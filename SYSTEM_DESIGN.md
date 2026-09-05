@@ -304,6 +304,19 @@ Prometheus metrics on the same port as the read API. The ones worth alerting on:
 database answers. They are separate because a container orchestrator should
 restart on the first and stop routing traffic on the second.
 
+## Containers
+
+The compose stack is defined but has not been executed here: this machine runs a
+WSL2 kernel that ships no loadable modules, so `xt_addrtype` is unavailable and
+Docker's bridge network driver cannot initialise. The daemon does not start, and
+neither the legacy nor the nft iptables backend helps — `ip_tables` is missing
+too. CI builds the image and checks its binaries; the compose networking itself
+is unproven.
+
+The property the stack would demonstrate — the two binaries talking over real
+gRPC against real PostgreSQL and surviving a kill — is covered without containers
+by `scripts/crash_recovery_proof.sh`.
+
 ## What is not here
 
 Aggregation and analytics belong downstream. There is no archive beyond the
