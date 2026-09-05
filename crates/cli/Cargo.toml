@@ -1,0 +1,36 @@
+[package]
+name = "slot-stream-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "slot-stream"
+path = "src/main.rs"
+
+[[bin]]
+name = "slot-stream-source"
+path = "src/bin/source.rs"
+
+[dependencies]
+slot-stream-common = { path = "../common" }
+slot-stream-ingester = { path = "../ingester" }
+slot-stream-processor = { path = "../processor" }
+slot-stream-persister = { path = "../persister" }
+slot-stream-backfill = { path = "../backfill" }
+slot-stream-dlq = { path = "../dlq" }
+slot-stream-api = { path = "../api" }
+slot-stream-pipeline = { path = "../pipeline" }
+
+tokio.workspace = true
+axum.workspace = true
+tonic.workspace = true
+sqlx.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true

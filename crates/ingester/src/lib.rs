@@ -81,6 +81,35 @@ impl Ingester {
         Self::build(config, Some(last_sequence))
     }
 
+    /// Create an ingester that feeds a channel the caller already holds.
+    ///
+    /// Used by the composition root, which owns both ends so it can control the
+    /// shutdown ordering.
+    pub fn with_sender(
+        config: IngesterConfig,
+        sender: mpsc::Sender<RawEvent>,
+        checkpoint: SequenceNumber,
+    ) -> Self {
+        let (shutdown, _) = tokio::sync::broadcast::channel(1);
+        let tracker = if checkpoint == SequenceNumber::ZERO {
+            SequenceTracker::new()
+        } else {
+            SequenceTracker::from_checkpoint(checkpoint)
+        };
+
+        Self {
+            buffer: Arc::new(EventBuffer::new(
+                config.channel_capacity,
+                config.overflow_policy,
+                sender,
+            )),
+            sequence_tracker: Arc::new(parking_lot::Mutex::new(tracker)),
+            stats: Arc::new(parking_lot::Mutex::new(IngesterStats::default())),
+            shutdown,
+            config,
+        }
+    }
+
     fn build(
         config: IngesterConfig,
         checkpoint: Option<SequenceNumber>,

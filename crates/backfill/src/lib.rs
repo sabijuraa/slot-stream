@@ -389,7 +389,7 @@ mod tests {
         assert_ne!(backfill_sequence(5, 0), backfill_sequence(5, 1));
 
         // Slot 5's highest possible sequence is below slot 6's lowest.
-        let slot5_max = backfill_sequence(5, u32::MAX.min(SLOT_SEQUENCE_STRIDE as u32 - 1));
+        let slot5_max = backfill_sequence(5, SLOT_SEQUENCE_STRIDE as u32 - 1);
         let slot6_min = backfill_sequence(6, 0);
         assert!(slot5_max < slot6_min);
     }

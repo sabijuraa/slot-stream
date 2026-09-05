@@ -22,6 +22,8 @@ pub struct RollbackOutcome {
     pub events_invalidated: u64,
     /// Slot rows marked non-canonical.
     pub slots_orphaned: u64,
+    /// Event rows brought back because their slot rejoined the canonical chain.
+    pub events_restored: u64,
 }
 
 impl RollbackExecutor {
@@ -63,6 +65,8 @@ impl RollbackExecutor {
             divergence_point = plan.divergence_point,
             slots = plan.depth(),
             events_invalidated = outcome.events_invalidated,
+            events_restored = outcome.events_restored,
+            restored_slots = plan.slots_to_restore.len(),
             "rollback committed"
         );
 
@@ -103,6 +107,39 @@ impl RollbackExecutor {
             .await
             .map_err(|e| Error::DatabaseQuery(e.to_string()))?;
             outcome.slots_orphaned = result.rows_affected();
+        }
+
+        // Restoring the adopted branch is the mirror of the invalidation above.
+        // A chain that forks away from a slot and later forks back to it will
+        // never re-deliver that slot's events — they are already stored — so the
+        // rows have to be revived here or they stay invisible for good.
+        let restore: Vec<i64> = plan.slots_to_restore.iter().map(|&s| s as i64).collect();
+
+        if !restore.is_empty() {
+            let result = sqlx::query(
+                r#"
+                UPDATE events
+                SET is_valid = true, invalidated_at = NULL, updated_at = NOW()
+                WHERE slot = ANY($1) AND is_valid = false
+                "#,
+            )
+            .bind(&restore)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Error::DatabaseQuery(e.to_string()))?;
+            outcome.events_restored = result.rows_affected();
+
+            sqlx::query(
+                r#"
+                UPDATE slots
+                SET is_canonical = true, status = 'Confirmed', updated_at = NOW()
+                WHERE slot = ANY($1)
+                "#,
+            )
+            .bind(&restore)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Error::DatabaseQuery(e.to_string()))?;
         }
 
         sqlx::query(

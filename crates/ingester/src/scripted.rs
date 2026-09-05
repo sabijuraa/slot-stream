@@ -111,6 +111,23 @@ impl ChainScript {
         self.slots.iter().map(|s| s.events.len()).sum()
     }
 
+    /// Whether every parent named by the script is itself in the script, apart
+    /// from the very first slot's.
+    ///
+    /// [`Self::canonical_events`] is only a valid yardstick for a contiguous
+    /// script. Where a parent is missing, the chain's true extent below the gap
+    /// is unknown, and the indexer deliberately keeps slots it cannot prove are
+    /// orphaned — so the two would disagree for reasons that are not a bug.
+    pub fn is_contiguous(&self) -> bool {
+        let known: std::collections::HashSet<u64> =
+            self.slots.iter().map(|s| s.slot).collect();
+        let first_parent = self.slots.first().map(|s| s.parent);
+
+        self.slots
+            .iter()
+            .all(|s| known.contains(&s.parent) || Some(s.parent) == first_parent)
+    }
+
     /// The canonical chain this script ends on, ascending.
     ///
     /// Computed independently of the pipeline: build the parent map in arrival
@@ -293,6 +310,20 @@ mod tests {
         let expected = script.canonical_events();
         let slots: Vec<u64> = expected.iter().map(|(s, _)| *s).collect();
         assert_eq!(slots, vec![100, 101, 105]);
+    }
+
+    #[test]
+    fn contiguity_detects_a_branch_that_reaches_into_a_gap() {
+        assert!(ChainScript::new().extend_from(100, 5, 1).is_contiguous());
+        assert!(ChainScript::new()
+            .extend_from(100, 5, 1)
+            .fork(105, 101, 1)
+            .is_contiguous());
+        // Parent 150 is never emitted.
+        assert!(!ChainScript::new()
+            .extend_from(100, 5, 1)
+            .fork_run(200, 150, 3, 1)
+            .is_contiguous());
     }
 
     #[test]

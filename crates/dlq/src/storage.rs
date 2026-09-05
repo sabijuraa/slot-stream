@@ -131,7 +131,7 @@ impl DlqStorage for PostgresStorage {
         .bind(&entry.raw_payload)
         .bind(entry.sequence.map(|s| s.0 as i64))
         .bind(entry.slot.map(|s| s as i64))
-        .bind(entry.kind.map(|k| format!("{:?}", k)))
+        .bind(entry.kind.map(|k| k.as_str().to_string()))
         .bind(&entry.error_message)
         .bind(&entry.error_category)
         .bind(entry.retry_count as i32)
@@ -156,7 +156,7 @@ impl DlqStorage for PostgresStorage {
         .await
         .map_err(|e| slot_stream_common::Error::DatabaseQuery(e.to_string()))?;
 
-        Ok(row.map(|r| Self::row_to_entry(r)))
+        Ok(row.map(Self::row_to_entry))
     }
 
     async fn update(&self, entry: DlqEntry) -> Result<()> {

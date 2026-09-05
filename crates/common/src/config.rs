@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Root configuration for the entire pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// Ingester configuration.
     pub ingester: IngesterSettings,
@@ -37,23 +37,6 @@ pub struct PipelineConfig {
     /// Read API configuration.
     #[serde(default)]
     pub api: ApiSettings,
-}
-
-impl Default for PipelineConfig {
-    fn default() -> Self {
-        Self {
-            ingester: IngesterSettings::default(),
-            processor: ProcessorSettings::default(),
-            persister: PersisterSettings::default(),
-            backfill: BackfillSettings::default(),
-            dlq: DlqSettings::default(),
-            database: DatabaseSettings::default(),
-            grpc: GrpcSettings::default(),
-            rpc: RpcSettings::default(),
-            observability: ObservabilitySettings::default(),
-            api: ApiSettings::default(),
-        }
-    }
 }
 
 /// Settings for the read API.

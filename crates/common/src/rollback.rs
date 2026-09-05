@@ -21,6 +21,15 @@ pub struct RollbackPlan {
     /// Slots to invalidate, descending.
     pub slots_to_rollback: Vec<u64>,
 
+    /// Slots of the adopted branch that were already known, ascending.
+    ///
+    /// These become canonical again. If an earlier reorg had orphaned them their
+    /// rows are still soft-deleted, and nothing will re-deliver those events —
+    /// the branch was already stored, it is only being re-adopted. So the
+    /// rollback has to restore them explicitly, or a chain that forks away and
+    /// later forks back leaves a hole where those slots should be.
+    pub slots_to_restore: Vec<u64>,
+
     /// The common ancestor the chain fell back to.
     pub divergence_point: u64,
 
@@ -47,9 +56,13 @@ impl RollbackPlan {
         let mut slots = fork.slots_to_rollback.clone();
         slots.sort_unstable_by(|a, b| b.cmp(a));
 
+        let mut restore = fork.new_branch.clone();
+        restore.sort_unstable();
+
         Self {
             id: uuid::Uuid::new_v4(),
             slots_to_rollback: slots,
+            slots_to_restore: restore,
             divergence_point: fork.divergence_point,
             fork_slot: fork.fork_slot,
             expected_parent: fork.expected_parent,
@@ -64,9 +77,9 @@ impl RollbackPlan {
         self.slots_to_rollback.len()
     }
 
-    /// True when the fork orphaned nothing that was persisted.
+    /// True when the plan changes nothing.
     pub fn is_empty(&self) -> bool {
-        self.slots_to_rollback.is_empty()
+        self.slots_to_rollback.is_empty() && self.slots_to_restore.is_empty()
     }
 
     /// Highest slot this plan touches.
@@ -98,5 +111,17 @@ mod tests {
         let plan = RollbackPlan::from_fork(&fork);
         assert!(plan.is_empty());
         assert_eq!(plan.highest_slot(), None);
+    }
+
+    #[test]
+    fn the_adopted_branch_is_carried_as_slots_to_restore() {
+        let fork = ForkInfo::new(1_025, 1_018, 1_003, 1_001)
+            .with_rollback_slots(vec![1_018, 1_017, 1_016, 1_015])
+            .with_new_branch(vec![1_003, 1_002]);
+        let plan = RollbackPlan::from_fork(&fork);
+
+        assert_eq!(plan.slots_to_restore, vec![1_002, 1_003]);
+        assert_eq!(plan.slots_to_rollback, vec![1_018, 1_017, 1_016, 1_015]);
+        assert!(!plan.is_empty());
     }
 }

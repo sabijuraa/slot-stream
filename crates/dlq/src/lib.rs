@@ -211,7 +211,7 @@ impl DeadLetterQueue {
 
                 Ok(exhausted)
             }
-            None => Err(Error::DlqWriteFailed(format!("Entry {} not found", id))),
+            None => Err(Error::DlqWriteFailed(format!("Entry {id} not found"))),
         }
     }
 

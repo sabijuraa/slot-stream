@@ -404,7 +404,12 @@ impl SlotChainTracker {
         };
 
         // Same block arriving again: a retransmit or a status update.
-        if let Some(existing) = self.slots.get(&slot) {
+        //
+        // Only when the slot is still canonical. Re-delivery of a slot we had
+        // orphaned is the cluster switching back to that branch, which is a
+        // reorg and has to be resolved as one — treating it as a duplicate would
+        // leave the abandoned branch canonical and the returning one invisible.
+        if let Some(existing) = self.slots.get(&slot).filter(|_| self.canonical.contains(&slot)) {
             if existing.same_block_as(&info) {
                 let previously_rooted = existing.status == SlotStatus::Rooted;
                 let entry = self.slots.get_mut(&slot).expect("checked above");
@@ -471,6 +476,7 @@ impl SlotChainTracker {
                 entry.status = SlotStatus::Orphaned;
             }
         }
+        self.refresh_head();
 
         // Adopt the new branch: the slots we walked, then the incoming slot.
         for &branch_slot in &branch {
@@ -527,17 +533,32 @@ impl SlotChainTracker {
         (cursor.min(parent), branch, true)
     }
 
-    /// Insert a slot and put it at the head of the canonical chain.
+    /// Insert a slot and put it on the canonical chain.
     fn insert_canonical(&mut self, info: SlotInfo) {
         let slot = info.slot;
         let rooted = info.status == SlotStatus::Rooted;
         self.slots.insert(slot, info);
         self.canonical.insert(slot);
-        self.head = Some(self.head.map_or(slot, |h| h.max(slot)));
+        self.refresh_head();
         if rooted {
             self.mark_rooted(slot);
         }
         self.prune();
+    }
+
+    /// Recompute the head from the canonical chain.
+    ///
+    /// The head is the highest slot on the canonical chain, which is not the
+    /// same as the highest slot ever seen. A reorg can move the head *down* —
+    /// we were building on branch A at slot 111, the cluster switched to branch
+    /// B whose tip is 107 — and carrying the old maximum forward would leave the
+    /// tracker comparing every subsequent slot against a head that is no longer
+    /// on the chain, turning ordinary extensions into phantom forks.
+    ///
+    /// Taking the maximum of the canonical set is valid because a slot's parent
+    /// always precedes it, so the chain's tip is its highest member.
+    fn refresh_head(&mut self) {
+        self.head = self.canonical.iter().next_back().copied();
     }
 
     /// Update a slot's status.
@@ -562,6 +583,7 @@ impl SlotChainTracker {
                 info.status = SlotStatus::Orphaned;
             }
         }
+        self.refresh_head();
     }
 
     /// Lowest slot number we are still willing to reason about.
@@ -585,6 +607,7 @@ impl SlotChainTracker {
         self.slots.retain(|&slot, _| slot >= floor);
         self.canonical.retain(|&slot| slot >= floor);
         self.stats.slots_pruned += (before - self.slots.len()) as u64;
+        self.refresh_head();
     }
 }
 
@@ -751,6 +774,37 @@ mod tests {
         let update = tracker.process_slot(SlotInfo::new(14, 10)).unwrap();
         let fork = update.fork().unwrap();
         assert_eq!(fork.slots_to_rollback, vec![13, 12, 11]);
+    }
+
+    /// A reorg can move the head to a *lower* slot: we were on a branch that had
+    /// reached 111, the cluster switched to one whose tip is 105. Keeping the
+    /// old maximum as the head made every later slot look like a fork.
+    #[test]
+    fn a_reorg_can_move_the_head_backwards() {
+        let mut tracker = SlotChainTracker::new(1000);
+        chain(&mut tracker, &[(100, 99), (101, 100), (102, 101), (103, 102)]);
+
+        // Jump to a branch off 101 that reaches 111.
+        tracker.process_slot(SlotInfo::new(110, 101)).unwrap();
+        tracker.process_slot(SlotInfo::new(111, 110)).unwrap();
+        assert_eq!(tracker.head(), Some(111));
+
+        // Now the cluster comes back to the original branch at 102.
+        let update = tracker.process_slot(SlotInfo::new(102, 101)).unwrap();
+        assert!(update.is_reorg(), "returning to 102 is a branch switch");
+        assert_eq!(
+            tracker.head(),
+            Some(102),
+            "the head must follow the canonical tip downwards"
+        );
+        assert_eq!(tracker.canonical_chain(), vec![100, 101, 102]);
+
+        // And the next slot must be an ordinary extension, not another fork.
+        let update = tracker.process_slot(SlotInfo::new(103, 102)).unwrap();
+        assert!(
+            matches!(update, ChainUpdate::Extended { slot: 103 }),
+            "expected an extension, got {update:?}"
+        );
     }
 
     #[test]

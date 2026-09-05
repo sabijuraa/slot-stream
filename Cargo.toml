@@ -7,6 +7,9 @@ members = [
     "crates/persister",
     "crates/backfill",
     "crates/dlq",
+    "crates/api",
+    "crates/pipeline",
+    "crates/cli",
 ]
 
 [workspace.package]
@@ -28,6 +31,9 @@ async-trait = "0.1"
 tonic = { version = "0.11", features = ["tls", "tls-roots"] }
 prost = "0.12"
 prost-types = "0.12"
+
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
 
 # Database
 sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json", "migrate"] }
