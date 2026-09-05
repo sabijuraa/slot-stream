@@ -409,7 +409,11 @@ impl SlotChainTracker {
         // orphaned is the cluster switching back to that branch, which is a
         // reorg and has to be resolved as one — treating it as a duplicate would
         // leave the abandoned branch canonical and the returning one invisible.
-        if let Some(existing) = self.slots.get(&slot).filter(|_| self.canonical.contains(&slot)) {
+        if let Some(existing) = self
+            .slots
+            .get(&slot)
+            .filter(|_| self.canonical.contains(&slot))
+        {
             if existing.same_block_as(&info) {
                 let previously_rooted = existing.status == SlotStatus::Rooted;
                 let entry = self.slots.get_mut(&slot).expect("checked above");
@@ -669,7 +673,10 @@ mod tests {
     #[test]
     fn new_slot_naming_an_older_parent_is_a_reorg() {
         let mut tracker = SlotChainTracker::new(1000);
-        chain(&mut tracker, &[(100, 99), (101, 100), (102, 101), (103, 102)]);
+        chain(
+            &mut tracker,
+            &[(100, 99), (101, 100), (102, 101), (103, 102)],
+        );
 
         let update = tracker.process_slot(SlotInfo::new(104, 101)).unwrap();
         let fork = update.fork().expect("should be a reorg");
@@ -702,7 +709,10 @@ mod tests {
     #[test]
     fn divergence_walks_a_multi_slot_branch_back_to_the_ancestor() {
         let mut tracker = SlotChainTracker::new(1000);
-        chain(&mut tracker, &[(100, 99), (101, 100), (102, 101), (103, 102), (104, 103)]);
+        chain(
+            &mut tracker,
+            &[(100, 99), (101, 100), (102, 101), (103, 102), (104, 103)],
+        );
 
         // Build a side branch off 100 without adopting it yet: 201 <- 202 <- 203.
         // Each of these is itself a reorg as it arrives; the last one leaves the
@@ -723,7 +733,10 @@ mod tests {
     #[test]
     fn unknown_parent_yields_a_bounded_divergence() {
         let mut tracker = SlotChainTracker::new(1000);
-        chain(&mut tracker, &[(100, 99), (101, 100), (102, 101), (103, 102)]);
+        chain(
+            &mut tracker,
+            &[(100, 99), (101, 100), (102, 101), (103, 102)],
+        );
 
         // Parent 150 is a slot we have never seen.
         let update = tracker.process_slot(SlotInfo::new(151, 150)).unwrap();
@@ -738,7 +751,10 @@ mod tests {
     #[test]
     fn unknown_parent_below_the_head_rolls_back_above_it() {
         let mut tracker = SlotChainTracker::new(1000);
-        chain(&mut tracker, &[(100, 99), (101, 100), (102, 101), (103, 102)]);
+        chain(
+            &mut tracker,
+            &[(100, 99), (101, 100), (102, 101), (103, 102)],
+        );
 
         // Parent 101 is known and canonical, but reached via an unknown slot.
         let update = tracker.process_slot(SlotInfo::new(120, 110)).unwrap();
@@ -782,7 +798,10 @@ mod tests {
     #[test]
     fn a_reorg_can_move_the_head_backwards() {
         let mut tracker = SlotChainTracker::new(1000);
-        chain(&mut tracker, &[(100, 99), (101, 100), (102, 101), (103, 102)]);
+        chain(
+            &mut tracker,
+            &[(100, 99), (101, 100), (102, 101), (103, 102)],
+        );
 
         // Jump to a branch off 101 that reaches 111.
         tracker.process_slot(SlotInfo::new(110, 101)).unwrap();

@@ -1,4 +1,9 @@
-version: '3.8'
+# The stack: a database, a chain source, and the indexer.
+#
+# `docker compose up` brings up something that demonstrates the point of the
+# project — the source serves a chain containing a reorg, and the indexer
+# self-heals to the canonical branch. Add `--profile monitoring` for Prometheus
+# and Grafana.
 
 services:
   postgres:
@@ -12,12 +17,33 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+    # Migrations are deliberately not mounted into docker-entrypoint-initdb.d.
+    # The indexer applies them itself through sqlx, which records what it has
+    # applied; running them twice from two places leaves the tracking table
+    # disagreeing with the schema.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    networks:
+      - slot-stream-network
+
+  # A scriptable chain over the real gRPC protocol. Replace with a real Geyser
+  # endpoint by pointing GRPC_ENDPOINT elsewhere.
+  source:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: slot-stream-source
+    entrypoint: ["slot-stream-source"]
+    environment:
+      RUST_LOG: info
+      SOURCE_BIND: 0.0.0.0:10000
+      SOURCE_PACE_MS: ${SOURCE_PACE_MS:-25}
+      SCRIPT_SLOTS: ${SCRIPT_SLOTS:-200}
+      SCRIPT_EVENTS_PER_SLOT: ${SCRIPT_EVENTS_PER_SLOT:-4}
+      SCRIPT_REORG_DEPTH: ${SCRIPT_REORG_DEPTH:-5}
     networks:
       - slot-stream-network
 
@@ -29,11 +55,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      source:
+        condition: service_started
     environment:
       RUST_LOG: info
+      LOG_FORMAT: json
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/slot_stream
-      GEYSER_ENDPOINT: ${GEYSER_ENDPOINT:-http://validator:10000}
+      GRPC_ENDPOINT: ${GRPC_ENDPOINT:-http://source:10000}
       RPC_ENDPOINT: ${RPC_ENDPOINT:-https://api.mainnet-beta.solana.com}
+      API_PORT: "8080"
+      METRICS_ENABLED: "true"
     ports:
       - "8080:8080"
     networks:

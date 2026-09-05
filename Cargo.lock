@@ -2520,9 +2520,14 @@ name = "slot-stream-pipeline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "bytes",
+ "chrono",
  "reqwest",
  "serde_json",
  "slot-stream-api",
+ "slot-stream-backfill",
  "slot-stream-common",
  "slot-stream-dlq",
  "slot-stream-ingester",

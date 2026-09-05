@@ -1,281 +1,88 @@
-# ADR 006: PostgreSQL Schema Design
+# ADR 006: The PostgreSQL schema
 
-## Status
-
-Accepted
+Status: accepted. `migrations/001_initial_schema.sql` is the authority.
 
 ## Context
 
-The persister writes high volumes of events to PostgreSQL:
-- Write rate: 1,000-10,000 events/second sustained
-- Query patterns: By slot, by sequence, by event type
-- Rollback support: Soft delete for reorg handling
-- Idempotency: Upserts must not create duplicates
-
-Schema design directly impacts:
-- Write throughput
-- Query performance
-- Storage efficiency
-- Operational complexity
+The schema has to support four things at once: idempotent writes keyed on a
+stable identity, rollback and its inverse, resumption after a crash, and a read
+path that never returns orphaned rows. Several of those pull in different
+directions.
 
 ## Decision
 
-### Events Table
+Five tables.
 
-```sql
-CREATE TABLE events (
-    -- Identity
-    id UUID PRIMARY KEY,
-    sequence BIGINT NOT NULL,
-    slot BIGINT NOT NULL,
-    parent_slot BIGINT,
+### `events`
 
-    -- Classification
-    kind VARCHAR(50) NOT NULL,
+One row per indexed event, with `UNIQUE (slot, source_seq)` as the identity the
+upsert keys on, and `is_valid` / `invalidated_at` implementing the soft-delete
+rollback.
 
-    -- Payload
-    data JSONB NOT NULL,
-    event_hash VARCHAR(64) NOT NULL,
+Both sequence numbers are stored. `seq` is the read order; `source_seq` is the
+identity. ADR 002 covers why they are not the same column.
 
-    -- Timestamps
-    received_at TIMESTAMPTZ NOT NULL,
-    indexed_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+The payload is `JSONB`. Event shapes differ by kind and change with the cluster,
+and a normalised schema would mean a migration every time upstream adds a field.
+A GIN index with `jsonb_path_ops` serves the signature and account lookups.
 
-    -- Soft delete support
-    is_valid BOOLEAN NOT NULL DEFAULT true,
-    invalidated_at TIMESTAMPTZ,
+Indexes on the read path are partial on `is_valid = true`. Every read filters on
+it, so invalid rows in those indexes are dead weight — and after a deep reorg
+there can be a lot of them.
 
-    -- Idempotency constraint
-    UNIQUE (slot, sequence)
-);
-```
+Autovacuum is tuned aggressively on this table (`vacuum_scale_factor = 0.01`).
+It is write-heavy, and a rollback updates whole slots at once, so dead tuples
+accumulate faster than the defaults assume.
 
-### Index Strategy
+### `slots`
 
-#### Primary Lookups
+The chain structure: slot, parent, status, `is_canonical`. Its purpose is
+startup. Without it the fork detector begins with an empty chain, treats the
+first slot after the restart as the beginning of a fresh one, and silently misses
+a reorg spanning the restart.
 
-```sql
--- Idempotent upserts and slot+sequence queries
-CREATE UNIQUE INDEX idx_events_slot_seq ON events (slot, sequence);
-```
+### `cursors`
 
-#### Slot-Based Queries
+The commit position, written in the same transaction as the batch it describes,
+so it can never claim progress that was not made. The upsert uses `GREATEST` so
+it cannot travel backwards.
 
-```sql
--- Get all events for a slot (filtering invalid)
-CREATE INDEX idx_events_slot_valid ON events (slot)
-WHERE is_valid = true;
-```
+### `reorgs`
 
-#### Sequence-Based Ordering
+An audit row per reorg *that changed state*: fork slot, divergence point,
+expected and actual parent, depth, the slots rolled back, and whether the
+divergence point was an observed slot or only a lower bound. This is what answers
+"what happened at 03:14".
 
-```sql
--- Get events in sequence order
-CREATE INDEX idx_events_sequence ON events (sequence);
-```
+A divergence that rolls back nothing and restores nothing does not get a row. It
+is a gap join, not a reorg, and filling this table with rows describing no change
+is how an audit trail stops being read.
 
-#### Event Type Filtering
+### `dead_letter_queue`
 
-```sql
--- Query by event kind
-CREATE INDEX idx_events_kind ON events (kind)
-WHERE is_valid = true;
-```
-
-#### Deduplication
-
-```sql
--- Check for duplicate event content
-CREATE INDEX idx_events_hash ON events (event_hash);
-```
-
-### Idempotent Upsert Pattern
-
-```sql
-INSERT INTO events (
-    id, sequence, slot, parent_slot, kind,
-    data, event_hash, received_at, indexed_at, is_valid
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
-ON CONFLICT (slot, sequence) DO UPDATE SET
-    -- Only update if new data has higher sequence
-    data = CASE WHEN EXCLUDED.sequence > events.sequence
-           THEN EXCLUDED.data ELSE events.data END,
-    updated_at = NOW()
-RETURNING (xmax = 0) AS inserted;
-```
-
-The `xmax = 0` trick detects whether this was an INSERT or UPDATE.
-
-### Cursors Table
-
-```sql
-CREATE TABLE cursors (
-    name VARCHAR(100) PRIMARY KEY,
-    slot BIGINT NOT NULL,
-    sequence BIGINT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL,
-    metadata JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-Used for:
-- Real-time cursor position
-- Backfill cursor position
-- Recovery checkpoints
-
-### Dead Letter Queue Table
-
-```sql
-CREATE TABLE dead_letter_queue (
-    id UUID PRIMARY KEY,
-    raw_payload BYTEA NOT NULL,
-    sequence BIGINT,
-    slot BIGINT,
-    kind VARCHAR(50),
-    error_message TEXT NOT NULL,
-    error_category VARCHAR(50) NOT NULL,
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    max_retries INTEGER NOT NULL DEFAULT 3,
-    failed_at TIMESTAMPTZ NOT NULL,
-    received_at TIMESTAMPTZ,
-    last_retry_at TIMESTAMPTZ,
-    resolved_at TIMESTAMPTZ,
-    is_resolved BOOLEAN NOT NULL DEFAULT false,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_dlq_unresolved ON dead_letter_queue (failed_at)
-WHERE is_resolved = false;
-```
-
-### Slots Table (Chain Tracking)
-
-```sql
-CREATE TABLE slots (
-    slot BIGINT PRIMARY KEY,
-    parent_slot BIGINT NOT NULL,
-    block_hash VARCHAR(88),
-    status VARCHAR(20) NOT NULL,
-    block_time BIGINT,
-    transaction_count INTEGER NOT NULL DEFAULT 0,
-    received_at TIMESTAMPTZ NOT NULL,
-    confirmed_at TIMESTAMPTZ,
-    rooted_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_slots_parent ON slots (parent_slot);
-CREATE INDEX idx_slots_status ON slots (status);
-```
-
-### Partitioning Consideration
-
-For very large deployments, partition by slot range:
-
-```sql
-CREATE TABLE events (
-    -- columns same as above
-) PARTITION BY RANGE (slot);
-
-CREATE TABLE events_0_1m PARTITION OF events
-    FOR VALUES FROM (0) TO (1000000);
-
-CREATE TABLE events_1m_2m PARTITION OF events
-    FOR VALUES FROM (1000000) TO (2000000);
-```
-
-**Note**: Not implemented by default. Add when table exceeds 100M rows.
-
-### Batch Write Optimization
-
-Write in batches within transactions:
-
-```sql
-BEGIN;
-INSERT INTO events VALUES (...), (...), (...);
--- Up to 1000 rows per batch
-COMMIT;
-```
-
-Benefits:
-- Reduced round trips
-- Atomic batch success/failure
-- Better WAL efficiency
-
-### Vacuum and Maintenance
-
-Recommended settings for high-write tables:
-
-```sql
-ALTER TABLE events SET (
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_analyze_scale_factor = 0.005,
-    autovacuum_vacuum_cost_limit = 1000
-);
-```
+Quarantined events with enough context to replay them, including the parent slot.
+ADR 004 covers why.
 
 ## Consequences
 
-### Positive
+Invalidated rows accumulate. `purge_invalid_below` exists to remove rows below a
+watermark once they are old enough to be beyond dispute; it is a deliberate
+operator action rather than something the pipeline does on its own, because the
+audit trail is the reason the rows are soft-deleted in the first place.
 
-- **High write throughput**: Batch inserts with upserts
-- **Query flexibility**: JSONB payload supports varied queries
-- **Rollback support**: Soft delete preserves audit trail
-- **Idempotency**: UNIQUE constraint prevents duplicates
+`JSONB` costs space against a normalised layout, and queries into the payload are
+slower than a real column would be. Both are accepted in exchange for not
+migrating the schema whenever an upstream payload changes.
 
-### Negative
+## What was rejected
 
-- **JSONB overhead**: Larger storage than binary formats
-- **Index maintenance**: Multiple indexes slow writes slightly
-- **Vacuum pressure**: High write rate requires aggressive vacuuming
+*A single `sequence` column.* See ADR 002.
 
-### Mitigations
+*`CREATE INDEX CONCURRENTLY` in a migration.* It cannot run inside a transaction,
+and sqlx runs migrations transactionally. The initial schema creates its indexes
+normally; a later index on a live table is an operator task, not a migration.
 
-- JSONB compression via TOAST
-- Partial indexes reduce index size
-- Autovacuum tuning for workload
+*Hard deletes on rollback.* See ADR 007.
 
-## Alternatives Considered
-
-### 1. Separate Tables per Event Kind
-
-Create `account_updates`, `transactions`, etc.
-
-**Rejected because**: Complicates rollback (must update multiple tables), schema changes harder.
-
-### 2. Binary Payload Storage
-
-Store protobuf/bincode instead of JSONB.
-
-**Rejected because**: Loses queryability, debugging harder.
-
-### 3. Time-Series Database (TimescaleDB)
-
-Use TimescaleDB hypertables.
-
-**Rejected because**: Adds operational complexity, partitioning handles scale needs.
-
-## Migration Strategy
-
-```sql
--- 001_initial_schema.sql
-CREATE TABLE events (...);
-CREATE TABLE cursors (...);
-CREATE TABLE dead_letter_queue (...);
-CREATE TABLE slots (...);
-
--- 002_add_indexes.sql
-CREATE INDEX CONCURRENTLY ...;
-```
-
-Use `sqlx migrate` for versioned migrations.
-
-## References
-
-- PostgreSQL UPSERT: https://www.postgresql.org/docs/current/sql-insert.html
-- Partial indexes: https://www.postgresql.org/docs/current/indexes-partial.html
-- JSONB performance: https://www.postgresql.org/docs/current/datatype-json.html
+*Partitioning `events` by slot range.* Worth doing at volume, and premature
+before there is a retention policy to partition along.

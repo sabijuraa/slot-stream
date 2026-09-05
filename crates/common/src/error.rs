@@ -137,18 +137,13 @@ impl Error {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
-            Error::RollbackFailed { .. }
-                | Error::DlqWriteFailed(_)
-                | Error::Configuration(_)
+            Error::RollbackFailed { .. } | Error::DlqWriteFailed(_) | Error::Configuration(_)
         )
     }
 
     /// Returns true if this is a duplicate that can be safely skipped.
     pub fn is_duplicate(&self) -> bool {
-        matches!(
-            self,
-            Error::DuplicateSequence(_) | Error::DuplicateKey(_)
-        )
+        matches!(self, Error::DuplicateSequence(_) | Error::DuplicateKey(_))
     }
 }
 

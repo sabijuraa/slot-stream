@@ -37,7 +37,12 @@ pub struct Cursor {
 
 impl Cursor {
     /// Create a new cursor.
-    pub fn new(name: impl Into<String>, slot: u64, seq: SequenceNumber, source_seq: SequenceNumber) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        slot: u64,
+        seq: SequenceNumber,
+        source_seq: SequenceNumber,
+    ) -> Self {
         Self {
             name: name.into(),
             slot,
@@ -100,10 +105,7 @@ impl CursorManager {
     /// Insert or update a cursor inside an existing transaction.
     ///
     /// Used by the persister so the cursor commits atomically with its batch.
-    pub async fn update_in_tx(
-        tx: &mut Transaction<'_, Postgres>,
-        cursor: &Cursor,
-    ) -> Result<()> {
+    pub async fn update_in_tx(tx: &mut Transaction<'_, Postgres>, cursor: &Cursor) -> Result<()> {
         sqlx::query(CURSOR_UPSERT)
             .bind(&cursor.name)
             .bind(cursor.slot as i64)

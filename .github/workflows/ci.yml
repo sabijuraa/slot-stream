@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The integration tests create their own databases from this one, so it points
+  # at a database the role may CREATEDB from rather than at the test database.
+  TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
 jobs:
   check:
@@ -17,30 +20,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+      # rust-toolchain.toml pins the version; this action honours it.
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: Swatinem/rust-cache@v2
+
+      # tonic-build shells out to protoc, so nothing compiles without it.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Check
-        run: cargo check --all-targets --all-features
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
@@ -51,7 +46,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: slot_stream_test
+          POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
@@ -62,88 +57,67 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features postgres
-
-      - name: Run migrations
-        run: sqlx migrate run
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/slot_stream_test
-
+      # No migration step: the pipeline applies its own migrations on startup,
+      # and each integration test does the same against a database it creates.
+      # Running them here as well would only test a second code path.
       - name: Run tests
-        run: cargo test --all-features --workspace
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/slot_stream_test
+        run: cargo test --workspace --all-features
+
+      - name: Crash recovery, at the process level
+        run: scripts/crash_recovery_proof.sh
 
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Build release
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
 
   docker:
     name: Docker Build
     runs-on: ubuntu-latest
     needs: [check, test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Build the image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
-          tags: slot-stream:latest
+          load: true
+          tags: slot-stream:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # A built image that cannot start is not a passing build.
+      - name: The image runs
+        run: docker run --rm --entrypoint sh slot-stream:ci -c 'test -x /usr/local/bin/slot-stream && test -x /usr/local/bin/slot-stream-source'
 
   security:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: Security audit
-        run: cargo audit
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   coverage:
     name: Code Coverage
@@ -154,7 +128,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: slot_stream_test
+          POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
@@ -165,30 +139,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features postgres
-
-      - name: Run migrations
-        run: sqlx migrate run
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/slot_stream_test
-
-      - name: Generate coverage report
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/slot_stream_test
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
+      # The same script used locally, so the number in VERIFICATION.md and the
+      # number in CI are produced the same way.
+      - name: Coverage
+        run: scripts/coverage.sh summary

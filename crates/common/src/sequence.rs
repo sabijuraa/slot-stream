@@ -81,7 +81,10 @@ impl SequenceRange {
 
     /// Create a single-element range.
     pub fn single(seq: SequenceNumber) -> Self {
-        Self { start: seq, end: seq }
+        Self {
+            start: seq,
+            end: seq,
+        }
     }
 
     /// Check if a sequence number is within this range.
@@ -136,10 +139,7 @@ impl SequenceAssigner {
 
     /// Take the next sequence number.
     pub fn next(&self) -> SequenceNumber {
-        SequenceNumber(
-            self.next
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        )
+        SequenceNumber(self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
 
     /// The value the next call to `next` will return, without consuming it.

@@ -47,7 +47,8 @@ impl RpcClient {
         if start > end {
             return Err(Error::BackfillRange { start, end });
         }
-        self.call("getBlocks", serde_json::json!([start, end])).await
+        self.call("getBlocks", serde_json::json!([start, end]))
+            .await
     }
 
     /// The current slot.
@@ -78,7 +79,9 @@ impl RpcClient {
             Err(e) => {
                 // A skipped or pruned slot is a normal answer, not a failure.
                 let text = e.to_string();
-                if text.contains("-32009") || text.contains("-32007") || text.contains("was skipped")
+                if text.contains("-32009")
+                    || text.contains("-32007")
+                    || text.contains("was skipped")
                 {
                     debug!(slot, "slot skipped or pruned");
                     Ok(None)
@@ -271,7 +274,10 @@ mod tests {
         let result = futures::executor::block_on(client.get_blocks(100, 50));
         assert!(matches!(
             result,
-            Err(Error::BackfillRange { start: 100, end: 50 })
+            Err(Error::BackfillRange {
+                start: 100,
+                end: 50
+            })
         ));
     }
 

@@ -201,7 +201,11 @@ impl RollbackExecutor {
             .map_err(|e| Error::DatabaseQuery(e.to_string()))?;
 
         let deleted = result.rows_affected();
-        info!(below_slot = slot, events_purged = deleted, "purged invalid events");
+        info!(
+            below_slot = slot,
+            events_purged = deleted,
+            "purged invalid events"
+        );
         Ok(deleted)
     }
 

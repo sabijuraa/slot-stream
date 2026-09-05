@@ -1,0 +1,11 @@
+# Scrape configuration for the compose stack.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # The indexer serves Prometheus text on the same port as the read API.
+  - job_name: slot-stream
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["slot-stream:8080"]

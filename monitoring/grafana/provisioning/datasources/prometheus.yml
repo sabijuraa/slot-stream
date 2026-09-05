@@ -1,0 +1,11 @@
+# Provisions the Prometheus above as Grafana's default datasource, so the
+# monitoring profile is usable without clicking through setup.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

@@ -1,144 +1,60 @@
-# ADR 002: Sequence Number Ordering Guarantees
+# ADR 002: Two sequence numbers
 
-## Status
-
-Accepted
+Status: accepted. Implemented in `crates/common/src/sequence.rs` and
+`crates/common/src/event.rs`.
 
 ## Context
 
-The Geyser plugin assigns monotonically increasing sequence numbers to events. These numbers are crucial for:
+Readers need a stable total order over indexed events. The stream supplies a
+sequence number, but it describes the validator's view: it is not monotonic
+across reconnects, it rewinds when a source replays from a resume point, and it
+says nothing about which branch an event was on.
 
-1. **Ordering**: Events must be processed in correct order
-2. **Gap detection**: Missing events must be identified for backfill
-3. **Duplicate detection**: Repeated events (from reconnects) must be skipped
-4. **Exactly-once semantics**: Combined with idempotent writes
-
-Without proper sequence handling, the index could:
-- Miss events (gaps)
-- Process events out of order
-- Duplicate events
+Writes also need an identity, so that re-delivering an event updates a row rather
+than inserting a second one. It is tempting to use the same number for both.
 
 ## Decision
 
-### Sequence Number Properties
+Carry two, doing different jobs.
 
-We treat sequence numbers as having these invariants:
+`source_seq` is the stream's own number. It is stable for a given event across
+redelivery and restarts, so row identity is `(slot, source_seq)`.
 
-1. **Monotonically increasing within a stream**: `seq(n+1) > seq(n)`
-2. **Globally unique per stream**: No two events share a sequence number
-3. **No guaranteed starting point**: First observed sequence may not be 0
+`seq` is assigned by the processor as it commits, from an atomic counter resumed
+from `MAX(seq)` in the database on startup. It defines the order readers see.
 
-### Tracking Implementation
+## Why not one
 
-```rust
-pub struct SequenceTracker {
-    last_seen: Option<SequenceNumber>,
-    gaps: Vec<SequenceRange>,
-}
+Keying identity on the assigned `seq` means a replayed event gets a fresh
+identity and inserts a duplicate row — the exact failure the identity exists to
+prevent.
 
-impl SequenceTracker {
-    pub fn process(&mut self, seq: SequenceNumber) -> SequenceResult {
-        match self.last_seen {
-            None => {
-                // First event - accept as baseline
-                self.last_seen = Some(seq);
-                SequenceResult::Processed
-            }
-            Some(last) => {
-                if seq == last {
-                    // Exact duplicate
-                    SequenceResult::Duplicate
-                } else if seq < last {
-                    // Regression - possible reorg or reconnect
-                    Err(SequenceRegression { current: last, received: seq })
-                } else if seq == last + 1 {
-                    // Perfect - next in order
-                    self.last_seen = Some(seq);
-                    SequenceResult::Processed
-                } else {
-                    // Gap detected
-                    let gap = SequenceRange::new(last + 1, seq - 1);
-                    self.gaps.push(gap);
-                    self.last_seen = Some(seq);
-                    SequenceResult::Gap { missing: gap }
-                }
-            }
-        }
-    }
-}
-```
+Ordering by `source_seq` means readers see arrival order, which is not monotonic.
+After a reconnect the source replays from the resume point and the numbers go
+backwards; a reader paging by sequence would see events it had already passed.
 
-### Gap Handling
+## Out-of-band events
 
-When a gap is detected:
+Backfilled and replayed events carry sequences from outside the live stream.
+Backfill derives its own as `slot << 20 | index`, which keeps each slot's range
+disjoint from its neighbours' and ordered by slot, but bears no relation to the
+live numbering.
 
-1. **Log the gap** with slot context for debugging
-2. **Emit metric** for monitoring
-3. **Queue for backfill** (gap range added to backfill queue)
-4. **Continue processing** current event (don't block)
-
-### Duplicate Handling
-
-Duplicates occur after:
-- Reconnection to an earlier point in the stream
-- Reprocessing after checkpoint recovery
-
-Strategy: **Skip silently**
-- Log at DEBUG level
-- Increment counter metric
-- Do not propagate to downstream
-
-### Regression Handling
-
-Sequence going backwards indicates:
-- Reconnection to an earlier stream position
-- Possible reorg (fork with different sequence space)
-
-Strategy: **Alert and investigate**
-- Log at WARN level
-- Check for concurrent reorg detection
-- May need to reset tracker from checkpoint
+These are exempt from the ingester's sequence tracking. Judging a replay against
+the live sequence discards it as a rewind; judging a backfill against it reports
+a gap of millions and queues a backfill for the gap it just filled. The event's
+origin says which rules apply.
 
 ## Consequences
 
-### Positive
+A sequence regression from the live stream is logged and the event forwarded
+anyway, because downstream writes are idempotent and a rewind after a reconnect
+is normal.
 
-- **Gap detection**: Missing events identified immediately
-- **Backfill triggering**: Gaps automatically queue backfill work
-- **Duplicate safety**: Reconnects don't cause double-processing
-- **Observability**: Metrics expose sequence health
+The assigner is an `AtomicU64`, so ordering does not serialise the processor.
 
-### Negative
-
-- **Memory for gaps**: Large gaps could accumulate if backfill fails
-- **Complexity**: Multiple code paths for different sequence results
-
-### Mitigations
-
-- Limit stored gap ranges (merge adjacent, cap total count)
-- Alert on excessive pending gaps
-- Periodic gap reconciliation against database
-
-## Alternatives Considered
-
-### 1. Rely on Database Deduplication Only
-
-Skip tracking, let UNIQUE constraint handle duplicates.
-
-**Rejected because**: Misses gap detection, doesn't trigger backfill.
-
-### 2. Strict In-Order Processing
-
-Block processing until gaps are filled.
-
-**Rejected because**: Creates unbounded backpressure, defeats real-time goal.
-
-### 3. External Sequence Coordination
-
-Use Redis/Kafka for sequence tracking.
-
-**Rejected because**: Adds operational dependency, latency, and failure modes.
-
-## References
-
-- Exactly-once semantics in stream processing: https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/
+Replaying an event does *not* move it in the read order. `seq` is set on insert
+and deliberately left out of the conflict update, so a row keeps the position it
+was first given. The alternative — reassigning it — would slide a row forward
+past a reader that had already paged beyond its old position, and that reader
+would never see it. The content and validity are refreshed; the place is not.

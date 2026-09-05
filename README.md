@@ -1,183 +1,181 @@
 # slot-stream
 
-A high-throughput, reorg-immune Solana indexing pipeline that ingests Geyser/gRPC streams, handles chain reorganizations correctly, and persists structured events to PostgreSQL with exactly-once semantics.
+A Solana indexing pipeline whose defining property is that it survives chain
+reorganisations. When the cluster abandons a branch, the data already written for
+that branch is invalidated and the replacement branch is indexed in its place —
+so what a reader sees always matches what a from-scratch replay of the canonical
+chain would have produced.
 
-## Hard Problems This Solves
+That property is not asserted here. It is proven by tests that drive real chain
+shapes, forks included, through the wired pipeline into a real PostgreSQL
+database and compare the result against an independently computed replay. See
+[VERIFICATION.md](VERIFICATION.md) for the evidence.
 
-### 1. Chain Reorg/Fork Handling
+## The problem
 
-Solana occasionally experiences chain reorganizations where confirmed blocks become orphaned. slot-stream detects forks by tracking slot-parent relationships and executes automatic rollbacks to invalidate orphaned data.
+A Solana slot names its parent. Most of the time the parent is the slot you just
+processed and the chain simply grows. Occasionally it is not: the cluster
+switches to a branch that diverged some slots back, and everything you indexed
+above the divergence point describes a chain that no longer exists.
 
-**Solution**: Slot-parent chain tracking with soft-delete rollback. Events from orphaned forks are marked invalid, preserving audit trail while ensuring query correctness.
+An indexer that ignores this accumulates rows nobody can distinguish from real
+ones. An indexer that deletes on any surprise loses data the first time a stream
+has a gap. The interesting work is in telling those two situations apart.
 
-### 2. Backpressure Management
+## How it handles a fork
 
-The gRPC stream can produce 50,000+ events/second during peak activity. Without backpressure, memory grows unboundedly leading to OOM crashes.
+The processor keeps a slot to parent map for a bounded window of recent slots.
+For each new slot it asks one question: does its parent lie on the chain we
+believe in?
 
-**Solution**: Bounded memory buffers with configurable overflow policies (drop-oldest, drop-newest, or block). Decouples ingestion from processing so slow downstream never blocks the stream.
+- The parent is the current head. The chain grew; nothing else to do.
+- The parent is somewhere else. Walk back from that parent until the walk
+  reaches a slot that is on our canonical chain. That slot is the common
+  ancestor. Everything canonical above it is orphaned, and everything walked
+  through on the way is the branch being adopted.
+- The walk leaves the window without finding an ancestor. We cannot prove
+  anything was orphaned, so nothing is rolled back. This is what a gap in the
+  stream looks like, and destroying data on that evidence would be worse than
+  keeping it.
 
-### 3. Dead Letter Queue
+A rollback is a soft delete. Orphaned rows are marked `is_valid = false` rather
+than removed, so the fork stays auditable, and every read path filters on that
+column. If the cluster later switches back to a branch it had abandoned — which
+happens — the rows are restored by the inverse update rather than re-fetched,
+because nothing is going to re-deliver those events.
 
-Events can fail for various reasons (malformed data, validation errors, database failures). Without a DLQ, failed events are silently lost.
+The rollback and the writes travel the same channel, in the order the processor
+decided on. Two channels would have no order relative to each other, and a
+rollback arriving after the events that replaced the orphaned branch would
+invalidate the wrong rows.
 
-**Solution**: All failed events go to a persistent DLQ with error categorization, retry support, and replay mechanisms. No silent data loss.
+## Layout
 
-### 4. Backfill + Real-time Merge
+| Crate | What it does |
+|-------|--------------|
+| `common` | Types, config, errors, the chain tracker, sequence assignment |
+| `ingester` | Stream sources and the bounded buffer where backpressure lives |
+| `processor` | Ordering, fork detection, rollback planning |
+| `persister` | Idempotent writes, rollback execution, the commit cursor |
+| `backfill` | RPC-driven historical fetch, merged with live data |
+| `dlq` | Dead-letter storage, inspection, replay |
+| `api` | The read API over indexed data |
+| `pipeline` | The composition root: where the above become a running system |
+| `cli` | The `slot-stream` binary and a scriptable `slot-stream-source` |
 
-Historical backfill and real-time streaming must merge correctly without gaps or duplicates.
+`pipeline` is a library rather than code inside the binary so the integration
+tests assemble the pipeline the same way the binary does. A test that wired its
+own would be testing an arrangement nothing ships.
 
-**Solution**: Dual cursor system with deduplication by (slot, sequence) pair. Gap detection triggers automatic backfill. Both sources merge through a unified event merger.
+## Running it
 
-### 5. Exactly-Once Semantics
-
-Network issues, reconnects, and restarts can cause duplicate events.
-
-**Solution**: Monotonic sequence numbers combined with idempotent upserts. UNIQUE(slot, sequence) constraint ensures duplicates are safely ignored.
-
-## Architecture
+The compose stack brings up PostgreSQL, a chain source that serves a scripted
+chain containing a reorg, and the indexer:
 
 ```
-gRPC Stream --> Ingester --> Bounded Buffer --> Processor --> Persister --> PostgreSQL
-                   |              |                |
-                   |              |                +--> Reorg Detector
-                   |              |                         |
-                   |              +--> Backpressure         +--> Rollback
-                   |
-                   +--> DLQ (failed events)
-
-RPC -----------> Backfill Engine ----+
-                                     |
-                                     +--> Event Merger --> Persister
+docker compose up --build
 ```
 
-## Crate Structure
+Then:
 
-| Crate | Description |
-|-------|-------------|
-| `slot-stream-common` | Shared types, sequence numbers, slot metadata, errors |
-| `slot-stream-ingester` | gRPC stream consumer, sequence tracking, bounded buffers |
-| `slot-stream-processor` | Event processing, reorg detection, handler routing |
-| `slot-stream-persister` | PostgreSQL writer with idempotent upserts, rollback support |
-| `slot-stream-backfill` | Historical data backfill engine, merge strategy |
-| `slot-stream-dlq` | Dead letter queue implementation, replay mechanism |
-
-## Quick Start
-
-### Prerequisites
-
-- Rust 1.75+
-- PostgreSQL 14+
-- Access to a Solana validator with Geyser plugin (e.g., Yellowstone gRPC)
-
-### Setup
-
-```bash
-# Clone and build
-git clone https://github.com/your-org/slot-stream
-cd slot-stream
-cargo build --release
-
-# Start PostgreSQL (using Docker)
-docker-compose up -d postgres
-
-# Run migrations
-export DATABASE_URL="postgres://localhost/slot_stream"
-sqlx migrate run
-
-# Run the indexer
-./target/release/slot-stream \
-    --geyser-endpoint http://validator:10000 \
-    --database-url postgres://localhost/slot_stream
+```
+curl localhost:8080/v1/status
+curl 'localhost:8080/v1/events?limit=10'
+curl localhost:8080/v1/chain/head
 ```
 
-### Docker
+Add `--profile monitoring` for Prometheus and Grafana.
 
-```bash
-# Build image
-docker build -t slot-stream .
+Against a real stream, point `GRPC_ENDPOINT` at a Geyser gRPC source instead.
 
-# Run with docker-compose
-docker-compose up
+### Without Docker
+
+You need PostgreSQL 16 and a database the indexer may create its schema in.
+Migrations are applied on startup, so there is no separate migrate step.
+
+```
+export DATABASE_URL=postgres://user:pass@localhost:5432/slot_stream
+export GRPC_ENDPOINT=http://localhost:10000
+
+cargo run --release --bin slot-stream-source &   # or a real Geyser source
+cargo run --release --bin slot-stream
 ```
 
 ## Configuration
 
-```toml
-# config.toml
+Settings come from a TOML file named by `CONFIG_FILE`, from the environment, or
+from both — the environment is layered over the file, so a deployment overrides
+`DATABASE_URL` without rewriting the file it ships with. Every section has
+defaults, so a config file names only what it changes.
 
-[ingester]
-buffer_capacity = 100000
-overflow_policy = "drop_oldest"  # or "drop_newest", "block"
-reconnect_max_attempts = 10
+| Variable | Meaning |
+|----------|---------|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `GRPC_ENDPOINT` | The stream source |
+| `RPC_ENDPOINT` | Solana JSON-RPC, used by backfill |
+| `API_PORT`, `API_ENABLED` | The read API |
+| `METRICS_PORT`, `METRICS_ENABLED` | Prometheus exposition |
+| `LOG_LEVEL`, `LOG_FORMAT` | `info`, and `json` or `pretty` |
 
-[processor]
-worker_count = 4
-batch_size = 100
+The settings worth understanding are in `[ingester]`: `channel_capacity` bounds
+how far ingestion may run ahead of the database, and `overflow_policy` decides
+what happens when it hits that bound. `block` applies real backpressure and never
+loses an event, which is what an indexer wants. `drop_newest` and `drop_oldest`
+shed load instead; they are there because some deployments genuinely prefer a
+fresh partial view to a complete late one, but for a chain index they are the
+wrong answer.
 
-[persister]
-database_url = "postgres://localhost/slot_stream"
-max_connections = 20
-batch_size = 1000
-batch_timeout_ms = 100
+## The read API
 
-[backfill]
-rpc_endpoint = "https://api.mainnet-beta.solana.com"
-batch_size = 100
-rate_limit_rps = 100
+Every query filters on `is_valid = true`, which is what makes the API
+reorg-aware without any caller knowing forks exist.
 
-[dlq]
-max_retries = 3
-auto_retry = false
-```
+| Endpoint | Returns |
+|----------|---------|
+| `GET /health/live` | Liveness |
+| `GET /health/ready` | Readiness, meaning the database answers |
+| `GET /metrics` | Prometheus exposition |
+| `GET /v1/status` | Counts, chain head, uptime |
+| `GET /v1/events` | Events, filtered by slot or sequence range and kind |
+| `GET /v1/events/slot/:slot` | Events in one slot |
+| `GET /v1/events/signature/:signature` | Events carrying a signature |
+| `GET /v1/events/account/:account` | Events touching an account |
+| `GET /v1/slots/:slot` | A slot's chain record, canonical or not |
+| `GET /v1/chain/head` | The canonical tip |
 
-## Key Design Decisions
+## Tests
 
-See the [Architecture Decision Records](docs/adr/) for detailed rationale:
-
-- [ADR-001: Reorg Detection Strategy](docs/adr/001-reorg-detection.md)
-- [ADR-002: Sequence Ordering Guarantees](docs/adr/002-sequence-ordering.md)
-- [ADR-003: Backpressure Model](docs/adr/003-backpressure-model.md)
-- [ADR-004: Dead Letter Queue Design](docs/adr/004-dlq-design.md)
-- [ADR-005: Backfill Merge Strategy](docs/adr/005-backfill-strategy.md)
-- [ADR-006: PostgreSQL Schema Design](docs/adr/006-postgres-schema.md)
-
-## Monitoring
-
-### Key Metrics
-
-| Metric | Description | Alert Threshold |
-|--------|-------------|-----------------|
-| `ingester.events_received` | Events from gRPC stream | - |
-| `ingester.events_dropped` | Events dropped due to backpressure | > 0 |
-| `processor.reorgs_detected` | Chain reorgs detected | > 5/hour |
-| `persister.write_latency_p99` | Database write latency | > 100ms |
-| `dlq.unresolved_count` | Failed events pending | > 100 |
-| `backfill.gaps_pending` | Sequence gaps to fill | > 10 |
-
-### Health Endpoints
+The integration tests need PostgreSQL. They create and drop a database per test,
+so point `TEST_DATABASE_URL` at one whose role may `CREATEDB`:
 
 ```
-GET /health/ready    # All connections established
-GET /health/live     # Pipeline processing
-GET /metrics         # Prometheus metrics
+export TEST_DATABASE_URL=postgres://slotstream:slotstream@127.0.0.1:5432/slot_stream_test
+cargo test --workspace
 ```
 
-## Development
+The suites worth knowing about:
 
-```bash
-# Run tests
-cargo test
+- `crates/pipeline/tests/reorg_proof.rs` — reorgs at depths 1, 5 and 32,
+  competing forks, repeated reorgs, re-adoption of an abandoned branch. Each
+  asserts persisted state equals an independently computed canonical replay.
+- `crates/pipeline/tests/recovery.rs` — a pipeline abandoned mid-stream, then
+  restarted, including a crash landing in the middle of a reorg.
+- `crates/pipeline/tests/backpressure.rs` — a deliberately slow persister, with
+  assertions that nothing was dropped and the queue never exceeded its bound.
+- `crates/pipeline/tests/dlq_and_backfill.rs` — quarantine and replay, and a
+  backfilled gap merging with live data.
+- `crates/pipeline/tests/read_api.rs` — the API served over a real socket
+  against an index that has been through a reorg.
+- `scripts/crash_recovery_proof.sh` — the same crash-recovery property at the
+  process level: the real binaries, a real gRPC socket, and a real `SIGKILL`.
+- `scripts/coverage.sh` — line coverage, using the toolchain's own LLVM
+  instrumentation.
 
-# Run with logging
-RUST_LOG=info cargo run
+## Documentation
 
-# Format code
-cargo fmt
-
-# Lint
-cargo clippy
-```
-
-## License
-
-MIT License - see [LICENSE](LICENSE)
+- [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) — the reorg model, ordering, idempotency,
+  crash recovery, and the schema.
+- [docs/adr](docs/adr) — the decisions and what they cost.
+- [docs/SCOPE.md](docs/SCOPE.md) — what this was built to.
+- [VERIFICATION.md](VERIFICATION.md) — what is proven, and how.
+- [BLOCKERS.md](BLOCKERS.md) — what is not, and why.

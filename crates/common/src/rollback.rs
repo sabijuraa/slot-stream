@@ -94,8 +94,7 @@ mod tests {
 
     #[test]
     fn plan_from_fork_is_ordered_highest_first() {
-        let fork = ForkInfo::new(105, 104, 100, 100)
-            .with_rollback_slots(vec![102, 104, 101, 103]);
+        let fork = ForkInfo::new(105, 104, 100, 100).with_rollback_slots(vec![102, 104, 101, 103]);
         let plan = RollbackPlan::from_fork(&fork);
 
         assert_eq!(plan.slots_to_rollback, vec![104, 103, 102, 101]);

@@ -108,8 +108,7 @@ impl EventHandler for MetricsHandler {
     }
 
     async fn handle(&self, event: &IndexedEvent) -> Result<()> {
-        metrics::counter!("processor.events", "kind" => event.kind.as_str())
-            .increment(1);
+        metrics::counter!("processor.events", "kind" => event.kind.as_str()).increment(1);
         Ok(())
     }
 }
