@@ -21,11 +21,11 @@ pub mod types;
 
 pub use config::{ApiSettings, ConfigError, PipelineConfig};
 pub use error::{Error, Result};
-pub use event::{ErrorCategory, EventKind, FailedEvent, IndexedEvent, RawEvent};
+pub use event::{ErrorCategory, EventKind, EventOrigin, FailedEvent, IndexedEvent, RawEvent};
+pub use rollback::RollbackPlan;
 pub use sequence::{
     SequenceAssigner, SequenceNumber, SequenceRange, SequenceResult, SequenceTracker,
 };
-pub use rollback::RollbackPlan;
 pub use slot::{
     ChainStats, ChainUpdate, ForkInfo, IgnoreReason, SlotChainTracker, SlotInfo, SlotStatus,
 };

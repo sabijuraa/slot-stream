@@ -54,12 +54,60 @@ impl EventKind {
 
     pub fn priority(&self) -> u8 {
         match self {
-            EventKind::SlotUpdate => 0,   // Process first for chain tracking
-            EventKind::BlockMeta => 1,    // Then block metadata
-            EventKind::Entry => 2,        // Then entries
-            EventKind::Transaction => 3,  // Then transactions
+            EventKind::SlotUpdate => 0,    // Process first for chain tracking
+            EventKind::BlockMeta => 1,     // Then block metadata
+            EventKind::Entry => 2,         // Then entries
+            EventKind::Transaction => 3,   // Then transactions
             EventKind::AccountUpdate => 4, // Finally account updates
         }
+    }
+}
+
+/// Where an event entered the pipeline.
+///
+/// The distinction is not cosmetic: it decides whether the event is evidence
+/// about the shape of the chain. A live event reports what the cluster is doing
+/// now, so its parent link drives fork detection. A backfilled event is a
+/// historical repair fetched from RPC — it describes a slot the cluster already
+/// confirmed, arriving long after the head has moved past it. Running one
+/// through fork detection would read "slot 6 builds on slot 5" as a branch that
+/// orphans everything above slot 6, which is the opposite of filling a gap.
+///
+/// It also decides whether the stream's sequence number means anything. The
+/// ingester tracks sequences to spot gaps and drop retransmits, and that is only
+/// coherent for one monotonic stream. A backfilled or replayed event carries a
+/// sequence from somewhere else entirely; letting the tracker judge it either
+/// discards the event as a rewind or reports a gap of millions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventOrigin {
+    /// From the live stream. Drives sequence tracking and fork detection.
+    #[default]
+    Live,
+    /// Fetched from RPC to fill a gap. Written, but not treated as chain news.
+    Backfill,
+    /// Re-injected from the dead-letter queue after an earlier failure.
+    ///
+    /// Unlike a backfill this really is a live-stream event, just late, so its
+    /// parent link is still evidence about the chain and fork detection applies.
+    Replay,
+}
+
+impl EventOrigin {
+    /// Stable name, for logs and metric labels.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventOrigin::Live => "live",
+            EventOrigin::Backfill => "backfill",
+            EventOrigin::Replay => "replay",
+        }
+    }
+
+    /// Whether the stream's own sequence number is meaningful for this event.
+    ///
+    /// Only the live stream produces one monotonic sequence; everything else
+    /// arrives out of band and must not be judged against it.
+    pub fn is_sequenced(&self) -> bool {
+        matches!(self, EventOrigin::Live)
     }
 }
 
@@ -70,6 +118,9 @@ impl EventKind {
 pub struct RawEvent {
     /// Sequence number from the stream.
     pub sequence: SequenceNumber,
+
+    /// Where the event came from.
+    pub origin: EventOrigin,
 
     /// Event kind for routing.
     pub kind: EventKind,
@@ -97,6 +148,7 @@ impl RawEvent {
     ) -> Self {
         Self {
             sequence,
+            origin: EventOrigin::Live,
             kind,
             slot,
             parent_slot: None,
@@ -108,6 +160,12 @@ impl RawEvent {
     /// Attach the parent slot reported by the stream.
     pub fn with_parent(mut self, parent_slot: u64) -> Self {
         self.parent_slot = Some(parent_slot);
+        self
+    }
+
+    /// Mark where this event came from.
+    pub fn with_origin(mut self, origin: EventOrigin) -> Self {
+        self.origin = origin;
         self
     }
 
@@ -226,6 +284,13 @@ pub struct FailedEvent {
     /// Slot if known.
     pub slot: Option<u64>,
 
+    /// Parent slot if the stream reported one.
+    ///
+    /// Retained so a replay is a faithful reconstruction: without it the
+    /// replayed event carries no parent, the chain tracker has nothing to check,
+    /// and the slot silently stops being part of the chain the indexer knows.
+    pub parent_slot: Option<u64>,
+
     /// Event kind if known.
     pub kind: Option<EventKind>,
 
@@ -318,6 +383,7 @@ impl FailedEvent {
             raw_payload: raw.payload.to_vec(),
             sequence: Some(raw.sequence),
             slot: Some(raw.slot),
+            parent_slot: raw.parent_slot,
             kind: Some(raw.kind),
             error_message: error.to_string(),
             error_category: ErrorCategory::of(error),
@@ -406,7 +472,10 @@ mod tests {
             ErrorCategory::PersistenceError,
             ErrorCategory::Unknown,
         ] {
-            assert_eq!(ErrorCategory::from_str_name(category.as_str()), Some(category));
+            assert_eq!(
+                ErrorCategory::from_str_name(category.as_str()),
+                Some(category)
+            );
         }
     }
 

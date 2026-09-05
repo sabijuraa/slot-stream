@@ -111,18 +111,28 @@ pub enum ReplaySelector {
 /// a kind. Entries that failed before any of that was known cannot be replayed
 /// automatically and need an operator.
 pub fn to_raw_event(entry: &crate::DlqEntry) -> Option<slot_stream_common::RawEvent> {
-    use slot_stream_common::{EventKind, RawEvent};
+    use slot_stream_common::{EventKind, EventOrigin, RawEvent};
 
     let slot = entry.slot?;
     let sequence = entry.sequence?;
-    let kind = entry
-        .kind
-        .or_else(|| entry.kind_name.as_deref().and_then(EventKind::from_str_name))?;
+    let kind = entry.kind.or_else(|| {
+        entry
+            .kind_name
+            .as_deref()
+            .and_then(EventKind::from_str_name)
+    })?;
 
-    Some(RawEvent::new(
+    let mut event = RawEvent::new(
         sequence,
         kind,
         slot,
         bytes::Bytes::from(entry.raw_payload.clone()),
-    ))
+    )
+    .with_origin(EventOrigin::Replay);
+
+    if let Some(parent) = entry.parent_slot {
+        event = event.with_parent(parent);
+    }
+
+    Some(event)
 }

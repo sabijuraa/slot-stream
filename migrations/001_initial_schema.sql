@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS dead_letter_queue (
     raw_payload BYTEA NOT NULL,
     sequence BIGINT,
     slot BIGINT,
+    parent_slot BIGINT,
     kind VARCHAR(50),
     error_message TEXT NOT NULL,
     error_category VARCHAR(50) NOT NULL,

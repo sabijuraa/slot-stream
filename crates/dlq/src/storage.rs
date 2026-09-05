@@ -120,17 +120,18 @@ impl DlqStorage for PostgresStorage {
         sqlx::query(
             r#"
             INSERT INTO dead_letter_queue (
-                id, raw_payload, sequence, slot, kind,
+                id, raw_payload, sequence, slot, parent_slot, kind,
                 error_message, error_category, retry_count, max_retries,
                 failed_at, received_at, is_resolved
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false)
             "#,
         )
         .bind(entry.id)
         .bind(&entry.raw_payload)
         .bind(entry.sequence.map(|s| s.0 as i64))
         .bind(entry.slot.map(|s| s as i64))
+        .bind(entry.parent_slot.map(|s| s as i64))
         .bind(entry.kind.map(|k| k.as_str().to_string()))
         .bind(&entry.error_message)
         .bind(&entry.error_category)
@@ -249,8 +250,8 @@ impl DlqStorage for PostgresStorage {
 
 impl PostgresStorage {
     fn row_to_entry(row: sqlx::postgres::PgRow) -> DlqEntry {
-        use sqlx::Row;
         use slot_stream_common::SequenceNumber;
+        use sqlx::Row;
 
         DlqEntry {
             id: row.get("id"),
@@ -259,6 +260,7 @@ impl PostgresStorage {
                 .get::<Option<i64>, _>("sequence")
                 .map(|s| SequenceNumber(s as u64)),
             slot: row.get::<Option<i64>, _>("slot").map(|s| s as u64),
+            parent_slot: row.get::<Option<i64>, _>("parent_slot").map(|s| s as u64),
             kind: row
                 .get::<Option<String>, _>("kind")
                 .as_deref()

@@ -33,6 +33,10 @@ pub struct DlqEntry {
     /// Slot if known.
     pub slot: Option<u64>,
 
+    /// Parent slot if the stream reported one, so a replay rebuilds the event
+    /// the chain tracker originally saw rather than a parentless copy of it.
+    pub parent_slot: Option<u64>,
+
     /// Event kind if known.
     pub kind: Option<EventKind>,
 
@@ -76,6 +80,7 @@ impl DlqEntry {
             raw_payload: failed.raw_payload,
             sequence: failed.sequence,
             slot: failed.slot,
+            parent_slot: failed.parent_slot,
             kind: failed.kind,
             kind_name: failed.kind.map(|k| k.as_str().to_string()),
             error_message: failed.error_message,

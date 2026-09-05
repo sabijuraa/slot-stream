@@ -22,7 +22,7 @@
 pub mod rpc;
 
 use slot_stream_common::{
-    Error, EventKind, RawEvent, Result, SequenceNumber, SequenceRange,
+    Error, EventKind, EventOrigin, RawEvent, Result, SequenceNumber, SequenceRange,
 };
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
@@ -349,24 +349,23 @@ impl Backfiller {
     }
 
     /// Turn a block into stream events and push them.
-    async fn emit_block(
-        &self,
-        block: &BlockData,
-        sink: &mpsc::Sender<RawEvent>,
-    ) -> Result<u64> {
+    async fn emit_block(&self, block: &BlockData, sink: &mpsc::Sender<RawEvent>) -> Result<u64> {
         let mut emitted = 0;
 
         for tx in &block.transactions {
             let payload = serde_json::to_vec(&tx.to_body())
                 .map_err(|e| Error::Serialization(e.to_string()))?;
 
+            // Marked as backfill so the processor writes it without reading it
+            // as a claim about where the chain currently is.
             let event = RawEvent::new(
                 backfill_sequence(block.slot, tx.index),
                 EventKind::Transaction,
                 block.slot,
                 bytes::Bytes::from(payload),
             )
-            .with_parent(block.parent_slot);
+            .with_parent(block.parent_slot)
+            .with_origin(EventOrigin::Backfill);
 
             sink.send(event).await.map_err(|_| Error::ChannelClosed)?;
             emitted += 1;

@@ -15,8 +15,13 @@ pub struct ProcessorState {
     /// Events that failed for a reason other than a DLQ-able parse error.
     pub events_failed: u64,
 
-    /// Reorgs detected.
+    /// Reorgs detected: divergences that actually changed persisted state.
     pub reorgs_detected: u64,
+
+    /// Divergences that changed nothing, because the stream had a gap and the
+    /// parent named a slot we never saw. Counted apart from reorgs so the reorg
+    /// number stays a signal.
+    pub gap_joins: u64,
 
     /// Total slots rolled back across all reorgs.
     pub slots_rolled_back: u64,
@@ -45,6 +50,7 @@ impl ProcessorState {
             events_dlq: 0,
             events_failed: 0,
             reorgs_detected: 0,
+            gap_joins: 0,
             slots_rolled_back: 0,
             max_rollback_depth: 0,
             last_reorg_slot: None,
@@ -61,6 +67,7 @@ impl ProcessorState {
             events_dlq: self.events_dlq,
             events_failed: self.events_failed,
             reorgs_detected: self.reorgs_detected,
+            gap_joins: self.gap_joins,
             slots_rolled_back: self.slots_rolled_back,
             max_rollback_depth: self.max_rollback_depth,
             last_reorg_slot: self.last_reorg_slot,
@@ -94,6 +101,7 @@ pub struct ProcessorStats {
     pub events_dlq: u64,
     pub events_failed: u64,
     pub reorgs_detected: u64,
+    pub gap_joins: u64,
     pub slots_rolled_back: u64,
     pub max_rollback_depth: usize,
     pub last_reorg_slot: Option<u64>,

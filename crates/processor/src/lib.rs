@@ -27,8 +27,8 @@ pub mod handler;
 pub mod state;
 
 use slot_stream_common::{
-    ChainUpdate, Error, EventKind, IndexedEvent, RawEvent, Result, RollbackPlan, SequenceAssigner,
-    SequenceNumber, SlotChainTracker, SlotInfo,
+    ChainUpdate, Error, EventKind, EventOrigin, IndexedEvent, RawEvent, Result, RollbackPlan,
+    SequenceAssigner, SequenceNumber, SlotChainTracker, SlotInfo,
 };
 use slot_stream_dlq::DeadLetterQueue;
 use slot_stream_persister::PersistCommand;
@@ -149,10 +149,7 @@ impl Processor {
 
     /// Consume raw events until the channel closes.
     pub async fn run(&self, mut rx: mpsc::Receiver<RawEvent>) -> Result<()> {
-        info!(
-            chain_window = self.config.chain_window,
-            "processor started"
-        );
+        info!(chain_window = self.config.chain_window, "processor started");
 
         while let Some(event) = rx.recv().await {
             if let Err(e) = self.process(event).await {
@@ -226,6 +223,20 @@ impl Processor {
             return Ok(());
         };
 
+        // A backfilled slot is history, not news. It was fetched from RPC because
+        // it is already on the confirmed chain, and it arrives with the head far
+        // past it — so the tracker would read its parent link as a branch off an
+        // old slot and orphan everything above. Record the slot, skip detection.
+        if raw.origin == EventOrigin::Backfill {
+            debug!(
+                slot = raw.slot,
+                "backfilled slot recorded without fork detection"
+            );
+            self.emit(PersistCommand::slot(SlotInfo::new(raw.slot, parent)))
+                .await?;
+            return Ok(());
+        }
+
         let info = SlotInfo::new(raw.slot, parent);
         let update = {
             let mut chain = self.chain.lock();
@@ -240,6 +251,28 @@ impl Processor {
             }
             ChainUpdate::Reorg(fork) => {
                 let plan = RollbackPlan::from_fork(&fork);
+
+                // A divergence that orphans nothing and restores nothing is not
+                // a reorg — it is the chain rejoining after a gap in the stream,
+                // where the parent we were given is a slot we never saw. Calling
+                // it a reorg would inflate the metric an operator pages on and
+                // fill the audit table with rows describing no change.
+                if plan.is_empty() {
+                    // At info, not debug: with no rollback there is no row in
+                    // the reorgs table either, so this log is the only record
+                    // that the chain was not contiguous here.
+                    info!(
+                        slot = fork.fork_slot,
+                        parent = fork.actual_parent,
+                        divergence_point = fork.divergence_point,
+                        bounded = fork.divergence_is_bound,
+                        "chain rejoined across a gap; nothing to roll back"
+                    );
+                    self.state.write().gap_joins += 1;
+                    metrics::counter!("processor.gap_joins").increment(1);
+                    self.emit(PersistCommand::slot(info)).await?;
+                    return Ok(());
+                }
 
                 if plan.depth() > self.config.max_rollback_depth {
                     // Refusing is the honest response: a rollback this deep means
@@ -306,11 +339,7 @@ impl Processor {
         // nothing is lost on the way to the database.
         let body: serde_json::Value = match serde_json::from_slice(&raw.payload) {
             Ok(value) => value,
-            Err(e) => {
-                return Err(Error::EventParse(format!(
-                    "payload is not valid JSON: {e}"
-                )))
-            }
+            Err(e) => return Err(Error::EventParse(format!("payload is not valid JSON: {e}"))),
         };
 
         Ok(serde_json::json!({

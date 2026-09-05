@@ -156,7 +156,10 @@ async fn a_branch_reaching_into_a_gap_keeps_what_it_cannot_disprove() -> Result<
         .extend_from(100, 5, 2) // 100..104
         .fork_run(200, 150, 3, 2); // 200 names parent 150, which never arrives
 
-    assert!(!script.is_contiguous(), "this script deliberately has a gap");
+    assert!(
+        !script.is_contiguous(),
+        "this script deliberately has a gap"
+    );
     run_script(&db.url, script).await?;
 
     let pool = db.pool().await?;
@@ -173,9 +176,16 @@ async fn a_branch_reaching_into_a_gap_keeps_what_it_cannot_disprove() -> Result<
     // orphaned, and the new branch is adopted alongside what came before.
     assert_eq!(invalid, 0, "nothing was provably orphaned");
     assert_eq!(slots, vec![100, 101, 102, 103, 104, 200, 201, 202]);
-    assert_eq!(reorgs.len(), 1, "the divergence is still recorded");
-    assert_eq!(reorgs[0].1, 150, "divergence point is the unreachable parent");
-    assert_eq!(reorgs[0].2, 0, "with an empty rollback set");
+
+    // And it is not filed as a reorg. Rolling back nothing and restoring nothing
+    // is the chain rejoining across a gap, not a fork; recording it as one would
+    // leave the reorg count and the reorg audit describing events in which no
+    // state changed, which is exactly the noise that makes an operator stop
+    // reading them.
+    assert!(
+        reorgs.is_empty(),
+        "a divergence that changes no state is a gap join, not a reorg, got {reorgs:?}"
+    );
 
     pool.close().await;
     db.cleanup().await;

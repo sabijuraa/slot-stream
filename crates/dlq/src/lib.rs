@@ -95,10 +95,7 @@ impl DeadLetterQueue {
 
     /// Create an in-memory DLQ for testing.
     pub fn in_memory() -> Self {
-        Self::new(
-            Arc::new(MemoryStorage::new()),
-            DlqConfig::default(),
-        )
+        Self::new(Arc::new(MemoryStorage::new()), DlqConfig::default())
     }
 
     /// Enqueue a failed raw event.
@@ -114,10 +111,13 @@ impl DeadLetterQueue {
             raw_payload: serde_json::to_vec(&event.data).unwrap_or_default(),
             sequence: Some(event.source_seq),
             slot: Some(event.slot),
+            parent_slot: event.parent_slot,
             kind: Some(event.kind),
             kind_name: Some(event.kind.as_str().to_string()),
             error_message: error.to_string(),
-            error_category: slot_stream_common::ErrorCategory::of(error).as_str().to_string(),
+            error_category: slot_stream_common::ErrorCategory::of(error)
+                .as_str()
+                .to_string(),
             retry_count: 0,
             max_retries: self.config.max_retries,
             failed_at: Utc::now(),
@@ -169,11 +169,7 @@ impl DeadLetterQueue {
     }
 
     /// List entries by category.
-    pub async fn list_by_category(
-        &self,
-        category: &str,
-        limit: usize,
-    ) -> Result<Vec<DlqEntry>> {
+    pub async fn list_by_category(&self, category: &str, limit: usize) -> Result<Vec<DlqEntry>> {
         self.storage.list_by_category(category, limit).await
     }
 
@@ -304,9 +300,7 @@ impl DeadLetterQueue {
     async fn select(&self, selector: &ReplaySelector, limit: usize) -> Result<Vec<DlqEntry>> {
         match selector {
             ReplaySelector::AllUnresolved => self.list_unresolved(limit).await,
-            ReplaySelector::ByCategory(category) => {
-                self.list_by_category(category, limit).await
-            }
+            ReplaySelector::ByCategory(category) => self.list_by_category(category, limit).await,
             ReplaySelector::ByIds(ids) => {
                 let mut entries = Vec::new();
                 for &id in ids.iter().take(limit) {
