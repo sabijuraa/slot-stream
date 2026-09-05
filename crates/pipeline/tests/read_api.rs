@@ -46,11 +46,23 @@ struct ApiServer {
 
 impl ApiServer {
     async fn start(store: EventStore) -> Result<Self> {
+        Self::serve(ApiState::new(store)).await
+    }
+
+    /// The same server, with a Prometheus handle attached.
+    async fn start_with_metrics(
+        store: EventStore,
+        handle: metrics_exporter_prometheus::PrometheusHandle,
+    ) -> Result<Self> {
+        Self::serve(ApiState::new(store).with_metrics(handle)).await
+    }
+
+    async fn serve(state: ApiState) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .context("binding the API")?;
         let addr = listener.local_addr()?;
-        let router = slot_stream_api::router(ApiState::new(store));
+        let router = slot_stream_api::router(state);
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -325,6 +337,65 @@ async fn the_api_serves_indexed_data_and_hides_what_a_reorg_orphaned() -> Result
     assert_eq!(status, 503);
 
     drop(server);
+    pool.close().await;
+    db.cleanup().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_render_what_the_pipeline_actually_did() -> Result<()> {
+    // Observability is easy to document and easy to get wrong: a metric that is
+    // declared but never emitted looks fine in a dashboard definition and is
+    // empty when an incident starts. So the recorder is installed for real, a
+    // chain with a fork is indexed for real, and /metrics is scraped over HTTP.
+    let db = TestDb::create().await?;
+
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .context("installing the Prometheus recorder")?;
+
+    let script = ChainScript::new()
+        .extend_from(1, 20, 3)
+        .fork_run(21, 15, 5, 3);
+
+    let config = test_config(&db.url);
+    let (pipeline, _done) = Pipeline::build(&config).await?;
+    pipeline.ingest(ScriptedSource::new(script)).await?;
+    pipeline.shutdown().await?;
+
+    let pool = db.pool().await?;
+    let store = EventStore::new(pool.clone(), 1_000, 100);
+    let server = ApiServer::start_with_metrics(store, handle).await?;
+    let client = reqwest::Client::new();
+
+    let response = client.get(server.url("/metrics")).send().await?;
+    let status = response.status().as_u16();
+    let body = response.text().await?;
+
+    println!("--- /metrics after indexing a chain with a fork ---");
+    println!("GET /metrics : {status}, {} bytes", body.len());
+
+    assert_eq!(status, 200, "with a recorder installed this must serve");
+
+    // The series an operator alerts on. Each must be present with a value, not
+    // merely declared somewhere in the source.
+    for metric in [
+        "ingester_events_emitted",
+        "processor_events",
+        "processor_reorgs",
+        "processor_rollback_depth",
+        "persister_events_written",
+        "persister_batches_written",
+        "persister_rollbacks_executed",
+        "persister_events_invalidated",
+    ] {
+        let line = body
+            .lines()
+            .find(|l| l.starts_with(metric) && !l.starts_with('#'))
+            .unwrap_or_else(|| panic!("/metrics has no series for {metric}:\n{body}"));
+        println!("  {line}");
+    }
+
     pool.close().await;
     db.cleanup().await;
     Ok(())
