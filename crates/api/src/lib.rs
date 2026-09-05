@@ -41,10 +41,7 @@ impl ApiState {
     }
 
     /// Attach a Prometheus handle so `/metrics` serves real numbers.
-    pub fn with_metrics(
-        mut self,
-        handle: metrics_exporter_prometheus::PrometheusHandle,
-    ) -> Self {
+    pub fn with_metrics(mut self, handle: metrics_exporter_prometheus::PrometheusHandle) -> Self {
         self.metrics = Some(Arc::new(handle));
         self
     }
@@ -122,7 +119,10 @@ impl<T> ListResponse<T> {
 
 async fn health_live() -> impl IntoResponse {
     // Liveness only asks whether the process is running.
-    (StatusCode::OK, Json(serde_json::json!({ "status": "alive" })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "alive" })),
+    )
 }
 
 async fn health_ready(State(state): State<ApiState>) -> Response {
@@ -144,11 +144,7 @@ async fn health_ready(State(state): State<ApiState>) -> Response {
 async fn metrics(State(state): State<ApiState>) -> Response {
     match state.metrics {
         Some(handle) => (StatusCode::OK, handle.render()).into_response(),
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "metrics are not enabled\n",
-        )
-            .into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE, "metrics are not enabled\n").into_response(),
     }
 }
 
@@ -225,10 +221,7 @@ async fn events_by_account(
     Ok(Json(ListResponse::new(events)))
 }
 
-async fn slot(
-    State(state): State<ApiState>,
-    Path(slot): Path<u64>,
-) -> ApiResult<Json<SlotRecord>> {
+async fn slot(State(state): State<ApiState>, Path(slot): Path<u64>) -> ApiResult<Json<SlotRecord>> {
     state
         .store
         .slot(slot)

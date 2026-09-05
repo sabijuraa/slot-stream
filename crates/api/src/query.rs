@@ -166,7 +166,11 @@ impl EventStore {
     }
 
     /// Events whose payload mentions `account` among its keys.
-    pub async fn events_by_account(&self, account: &str, limit: Option<u32>) -> Result<Vec<EventRecord>> {
+    pub async fn events_by_account(
+        &self,
+        account: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<EventRecord>> {
         let rows = sqlx::query(
             r#"
             SELECT id, seq, source_seq, slot, parent_slot, kind, data,
@@ -303,8 +307,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn page_size_defaults_and_clamps() {
+    // A lazy pool registers with the tokio runtime even though it never
+    // connects, so the test needs one.
+    #[tokio::test]
+    async fn page_size_defaults_and_clamps() {
         let store = store();
         assert_eq!(store.page_size(None), 100);
         assert_eq!(store.page_size(Some(50)), 50);

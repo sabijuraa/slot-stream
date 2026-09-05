@@ -29,6 +29,15 @@ impl ScriptedEvent {
             body: serde_json::json!({ "label": label.into() }),
         }
     }
+
+    /// An event with a caller-supplied body.
+    ///
+    /// The label-only form is enough to prove chain behaviour, where the body is
+    /// just something to count. Exercising the read API needs payloads with the
+    /// fields it queries on, so the body is open.
+    pub fn new(kind: EventKind, body: serde_json::Value) -> Self {
+        Self { kind, body }
+    }
 }
 
 /// One slot in the script, with the events it carries.
@@ -100,8 +109,11 @@ impl ChainScript {
         for offset in 0..count {
             let slot = first_slot + offset;
             let slot_parent = if offset == 0 { parent } else { slot - 1 };
-            self.slots
-                .push(ScriptedSlot::with_events(slot, slot_parent, events_per_slot));
+            self.slots.push(ScriptedSlot::with_events(
+                slot,
+                slot_parent,
+                events_per_slot,
+            ));
         }
         self
     }
@@ -119,8 +131,7 @@ impl ChainScript {
     /// is unknown, and the indexer deliberately keeps slots it cannot prove are
     /// orphaned — so the two would disagree for reasons that are not a bug.
     pub fn is_contiguous(&self) -> bool {
-        let known: std::collections::HashSet<u64> =
-            self.slots.iter().map(|s| s.slot).collect();
+        let known: std::collections::HashSet<u64> = self.slots.iter().map(|s| s.slot).collect();
         let first_parent = self.slots.first().map(|s| s.parent);
 
         self.slots
@@ -301,9 +312,7 @@ mod tests {
     #[test]
     fn a_fork_drops_the_orphaned_slots_from_the_expected_state() {
         // 100..104, then 105 builds on 101, orphaning 102, 103, 104.
-        let script = ChainScript::new()
-            .extend_from(100, 5, 1)
-            .fork(105, 101, 1);
+        let script = ChainScript::new().extend_from(100, 5, 1).fork(105, 101, 1);
 
         assert_eq!(script.canonical_chain(), vec![99, 100, 101, 105]);
 

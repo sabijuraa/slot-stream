@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod sources;
+
 use anyhow::{Context, Result};
 use slot_stream_common::PipelineConfig;
 use slot_stream_ingester::{ChainScript, ScriptedSource};
@@ -30,10 +32,7 @@ impl TestDb {
     /// Create a uniquely named database.
     pub async fn create() -> Result<Self> {
         let admin_url = base_url();
-        let name = format!(
-            "ss_test_{}",
-            uuid_like(),
-        );
+        let name = format!("ss_test_{}", uuid_like(),);
 
         let admin = PgPool::connect(&admin_url)
             .await
@@ -161,12 +160,14 @@ pub async fn persisted_events(pool: &PgPool) -> Result<Vec<(u64, String)>> {
 
 /// Distinct slots holding valid events, ascending.
 pub async fn persisted_slots(pool: &PgPool) -> Result<Vec<u64>> {
-    let rows = sqlx::query(
-        "SELECT DISTINCT slot FROM events WHERE is_valid = true ORDER BY slot ASC",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(|r| r.get::<i64, _>("slot") as u64).collect())
+    let rows =
+        sqlx::query("SELECT DISTINCT slot FROM events WHERE is_valid = true ORDER BY slot ASC")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| r.get::<i64, _>("slot") as u64)
+        .collect())
 }
 
 /// Counts of valid and invalidated rows.
@@ -226,6 +227,20 @@ pub async fn assert_no_duplicate_rows(pool: &PgPool) -> Result<()> {
         rows.len()
     );
     Ok(())
+}
+
+/// The committed cursor, as (slot, seq, source_seq).
+pub async fn cursor_position(pool: &PgPool) -> Result<Option<(u64, u64, u64)>> {
+    let row = sqlx::query("SELECT slot, seq, source_seq FROM cursors WHERE name = 'live'")
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| {
+        (
+            r.get::<i64, _>("slot") as u64,
+            r.get::<i64, _>("seq") as u64,
+            r.get::<i64, _>("source_seq") as u64,
+        )
+    }))
 }
 
 /// Print the two sides of a comparison, for evidence in the test log.
