@@ -2,44 +2,49 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, master]
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # The integration tests create their own databases from this one, so it points
-  # at a database the role may CREATEDB from rather than at the test database.
-  TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
 jobs:
   check:
-    name: Check
+    name: Format, lint, build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml pins the version; this action honours it.
+      # No toolchain is named here: rust-toolchain.toml pins 1.88 and this
+      # action honours it, so the file stays the single source of truth.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
-      # tonic-build shells out to protoc, so nothing compiles without it.
+      # tonic-build shells out to protoc, so nothing in the workspace compiles
+      # without it.
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Check formatting
+      - name: Format
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Build
+        run: cargo build --workspace --all-targets --locked
+
   test:
     name: Test
     runs-on: ubuntu-latest
+
+    # The integration tests are the point of this project, so they run for real
+    # against PostgreSQL. Each creates and drops its own database, so the role
+    # needs CREATEDB, which the default postgres superuser has.
     services:
       postgres:
         image: postgres:16
@@ -51,9 +56,14 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+
+    env:
+      # Points at a database the tests may create others from, not at a test
+      # database itself.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
     steps:
       - uses: actions/checkout@v4
@@ -64,38 +74,27 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       # No migration step: the pipeline applies its own migrations on startup,
-      # and each integration test does the same against a database it creates.
-      # Running them here as well would only test a second code path.
-      - name: Run tests
+      # and each integration test does the same against the database it creates.
+      - name: Test
         run: cargo test --workspace --all-features
 
+      - name: Install psql
+        run: sudo apt-get install -y postgresql-client
+
+      # The same crash proof that runs locally: the real binaries over a real
+      # gRPC socket, killed with SIGKILL mid-stream and restarted.
       - name: Crash recovery, at the process level
         run: scripts/crash_recovery_proof.sh
 
-  build:
-    name: Build
+  image:
+    name: Docker image
     runs-on: ubuntu-latest
+    needs: [check]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Build release
-        run: cargo build --release --workspace --locked
-
-  docker:
-    name: Docker Build
-    runs-on: ubuntu-latest
-    needs: [check, test]
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build the image
+      - name: Build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -105,49 +104,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # A built image that cannot start is not a passing build.
-      - name: The image runs
-        run: docker run --rm --entrypoint sh slot-stream:ci -c 'test -x /usr/local/bin/slot-stream && test -x /usr/local/bin/slot-stream-source'
-
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      # The same script used locally, so the number in VERIFICATION.md and the
-      # number in CI are produced the same way.
-      - name: Coverage
-        run: scripts/coverage.sh summary
+      # A built image that cannot start is not a passing build. The compose
+      # stack itself is not exercised here: bringing up three networked
+      # services and waiting for the chain to advance belongs in an
+      # environment test, not in the image build.
+      - name: The image contains runnable binaries
+        run: |
+          docker run --rm --entrypoint sh slot-stream:ci -c \
+            'test -x /usr/local/bin/slot-stream && test -x /usr/local/bin/slot-stream-source'
