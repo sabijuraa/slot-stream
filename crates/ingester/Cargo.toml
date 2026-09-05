@@ -1,0 +1,38 @@
+[package]
+name = "slot-stream-ingester"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+slot-stream-common = { path = "../common" }
+
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+bytes.workspace = true
+backoff.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+
+serde_json.workspace = true
+
+chrono.workspace = true
+
+async-stream.workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
+proptest.workspace = true
+
+[build-dependencies]
+tonic-build = "0.11"

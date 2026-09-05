@@ -1,0 +1,130 @@
+# slot-stream Configuration Example
+# Copy to config.toml and customize
+
+[ingester]
+# Maximum events to buffer in memory
+buffer_capacity = 100000
+
+# What to do when buffer is full
+# Options: "drop_oldest", "drop_newest", "block"
+overflow_policy = "drop_oldest"
+
+# Channel capacity for downstream consumers
+channel_capacity = 10000
+
+# Connection timeout for gRPC (seconds)
+connect_timeout_secs = 10
+
+# Maximum reconnection attempts before giving up
+reconnect_max_attempts = 10
+
+# Initial backoff for reconnection (milliseconds)
+initial_backoff_ms = 100
+
+# Maximum backoff for reconnection (milliseconds)
+max_backoff_ms = 30000
+
+# Enable TLS for gRPC connection
+tls_enabled = false
+
+# Path to TLS certificate (required if tls_enabled)
+# tls_cert_path = "/path/to/cert.pem"
+
+
+[processor]
+# Number of worker tasks for parallel processing
+worker_count = 4
+
+# Events per batch
+batch_size = 100
+
+# Maximum time to wait for batch (milliseconds)
+batch_timeout_ms = 100
+
+# Execute handlers in parallel
+parallel_handlers = true
+
+# Maximum processing latency before alerting (seconds)
+max_latency_secs = 5
+
+# Stop on first handler error
+fail_fast = false
+
+
+[persister]
+# PostgreSQL connection URL
+database_url = "postgres://postgres:postgres@localhost:5432/slot_stream"
+
+# Maximum connections in pool
+max_connections = 20
+
+# Minimum connections to maintain
+min_connections = 5
+
+# Connection acquisition timeout (seconds)
+acquire_timeout_secs = 30
+
+# Idle connection timeout (seconds)
+idle_timeout_secs = 600
+
+# Maximum connection lifetime (seconds)
+max_lifetime_secs = 1800
+
+# Batch size for writes
+batch_size = 1000
+
+# Batch timeout (milliseconds)
+batch_timeout_ms = 100
+
+
+[backfill]
+# Solana RPC endpoint for historical data
+rpc_endpoint = "https://api.mainnet-beta.solana.com"
+
+# Slots per RPC request
+batch_size = 100
+
+# Delay between batches (milliseconds)
+batch_delay_ms = 100
+
+# Maximum concurrent RPC requests
+max_concurrent = 4
+
+# Retry count for failed requests
+max_retries = 3
+
+# Rate limit (requests per second)
+rate_limit_rps = 100
+
+
+[dlq]
+# Maximum retry attempts before exhausted
+max_retries = 3
+
+# Automatically retry failed events
+auto_retry = false
+
+# Channel buffer size
+channel_size = 1000
+
+# Hours before unresolved items trigger alert
+alert_threshold_hours = 24
+
+
+[metrics]
+# Enable Prometheus metrics
+enabled = true
+
+# Metrics server port
+port = 8080
+
+# Metrics path
+path = "/metrics"
+
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log format: json, pretty
+format = "json"

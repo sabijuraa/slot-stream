@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package slot_stream.v1;
+
+// The stream slot-stream consumes.
+//
+// This is deliberately narrow. slot-stream needs four things from a source:
+// what happened, which slot it happened in, which slot that one builds on, and
+// a sequence it can resume from. Everything richer is the source's business.
+//
+// parent_slot is the field that makes reorg handling possible at all. A source
+// that omits it leaves the indexer unable to tell an extension from a fork, so
+// it is required for slot-bearing events rather than optional.
+service SlotStream {
+  // Stream events from a resume point. The server should replay from
+  // `from_sequence` exclusive where it can, so a reconnecting client does not
+  // lose events. Redelivery is expected and safe: the indexer's writes are
+  // idempotent.
+  rpc Subscribe(SubscribeRequest) returns (stream StreamEvent);
+
+  // Liveness and stream position, for health checks.
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+}
+
+message SubscribeRequest {
+  // Resume after this sequence. Zero means "from the beginning of what you have".
+  uint64 from_sequence = 1;
+
+  // Restrict to these event kinds. Empty means all of them.
+  repeated string kinds = 2;
+}
+
+message StreamEvent {
+  // Monotonic within a single source run. Used for gap detection and resume.
+  uint64 sequence = 1;
+
+  // One of: SlotUpdate, AccountUpdate, Transaction, BlockMeta, Entry.
+  string kind = 2;
+
+  // The slot this event belongs to.
+  uint64 slot = 3;
+
+  // The slot `slot` builds on. Required for anything that participates in fork
+  // detection; absent only for events with no chain position.
+  optional uint64 parent_slot = 4;
+
+  // Opaque body. slot-stream stores it as JSON.
+  bytes payload = 5;
+
+  // Source-side timestamp, milliseconds since the epoch.
+  int64 received_at_ms = 6;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  // Highest sequence the source has produced.
+  uint64 highest_sequence = 1;
+
+  // Highest slot the source has produced.
+  uint64 highest_slot = 2;
+
+  // Whether the source is currently producing.
+  bool active = 3;
+}
