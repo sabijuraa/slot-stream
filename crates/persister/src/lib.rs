@@ -228,6 +228,11 @@ impl Persister {
     /// Execute a rollback plan directly.
     pub async fn rollback(&self, plan: &RollbackPlan) -> Result<RollbackOutcome> {
         let outcome = self.rollback_executor.execute(plan).await?;
+
+        metrics::counter!("persister.rollbacks_executed").increment(1);
+        metrics::counter!("persister.events_invalidated").increment(outcome.events_invalidated);
+        metrics::counter!("persister.events_restored").increment(outcome.events_restored);
+
         let mut stats = self.stats.lock();
         stats.rollbacks_executed += 1;
         stats.events_invalidated += outcome.events_invalidated;
@@ -298,9 +303,18 @@ impl Persister {
         let events = std::mem::take(&mut pending.events);
         let slots = std::mem::take(&mut pending.slots);
         let watermark = pending.take_watermark();
+        let started = std::time::Instant::now();
 
         match self.commit(&events, &slots, watermark).await {
             Ok(outcome) => {
+                metrics::counter!("persister.events_written").increment(outcome.inserted);
+                metrics::counter!("persister.events_updated").increment(outcome.updated);
+                metrics::counter!("persister.slots_written").increment(slots.len() as u64);
+                metrics::counter!("persister.batches_written").increment(1);
+                metrics::histogram!("persister.batch_size").record(events.len() as f64);
+                metrics::histogram!("persister.write_latency_ms")
+                    .record(started.elapsed().as_secs_f64() * 1000.0);
+
                 let mut stats = self.stats.lock();
                 stats.events_written += outcome.inserted;
                 stats.events_updated += outcome.updated;
@@ -309,6 +323,9 @@ impl Persister {
                 Ok(())
             }
             Err(e) => {
+                // The signal an operator alerts on. It has to be emitted here,
+                // not only counted in the stats struct nothing scrapes.
+                metrics::counter!("persister.write_errors").increment(1);
                 self.stats.lock().write_errors += 1;
                 error!(error = %e, events = events.len(), "batch commit failed");
                 Err(e)
