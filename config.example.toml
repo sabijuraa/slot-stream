@@ -1,130 +1,98 @@
-# slot-stream Configuration Example
-# Copy to config.toml and customize
+# slot-stream configuration.
+#
+# Every section has defaults, so a real config file only needs the settings it
+# changes. This file lists all of them with their defaults, as a reference.
+#
+# Environment variables are layered over whatever this file says, so a
+# deployment can override DATABASE_URL, GRPC_ENDPOINT, RPC_ENDPOINT, API_PORT,
+# API_ENABLED, METRICS_PORT, METRICS_ENABLED, LOG_LEVEL and LOG_FORMAT without
+# editing it.
 
-[ingester]
-# Maximum events to buffer in memory
-buffer_capacity = 100000
-
-# What to do when buffer is full
-# Options: "drop_oldest", "drop_newest", "block"
-overflow_policy = "drop_oldest"
-
-# Channel capacity for downstream consumers
-channel_capacity = 10000
-
-# Connection timeout for gRPC (seconds)
-connect_timeout_secs = 10
-
-# Maximum reconnection attempts before giving up
-reconnect_max_attempts = 10
-
-# Initial backoff for reconnection (milliseconds)
-initial_backoff_ms = 100
-
-# Maximum backoff for reconnection (milliseconds)
-max_backoff_ms = 30000
-
-# Enable TLS for gRPC connection
-tls_enabled = false
-
-# Path to TLS certificate (required if tls_enabled)
-# tls_cert_path = "/path/to/cert.pem"
-
-
-[processor]
-# Number of worker tasks for parallel processing
-worker_count = 4
-
-# Events per batch
-batch_size = 100
-
-# Maximum time to wait for batch (milliseconds)
-batch_timeout_ms = 100
-
-# Execute handlers in parallel
-parallel_handlers = true
-
-# Maximum processing latency before alerting (seconds)
-max_latency_secs = 5
-
-# Stop on first handler error
-fail_fast = false
-
-
-[persister]
-# PostgreSQL connection URL
-database_url = "postgres://postgres:postgres@localhost:5432/slot_stream"
-
-# Maximum connections in pool
+[database]
+url = "postgres://postgres:postgres@localhost:5432/slot_stream"
 max_connections = 20
-
-# Minimum connections to maintain
 min_connections = 5
-
-# Connection acquisition timeout (seconds)
 acquire_timeout_secs = 30
-
-# Idle connection timeout (seconds)
 idle_timeout_secs = 600
-
-# Maximum connection lifetime (seconds)
 max_lifetime_secs = 1800
 
-# Batch size for writes
-batch_size = 1000
+[grpc]
+# The stream source. In production a Geyser gRPC endpoint; the bundled
+# slot-stream-source binary speaks the same protocol.
+endpoint = "http://localhost:10000"
+connect_timeout_secs = 10
+request_timeout_secs = 30
+# Reconnection backoff, doubling from initial to max.
+initial_backoff_ms = 100
+max_backoff_ms = 30000
+max_reconnect_attempts = 10
+tls_enabled = false
+# tls_cert_path = "/path/to/cert.pem"
 
-# Batch timeout (milliseconds)
+[ingester]
+# The bound on how far ingestion may run ahead of the database. Memory is
+# capped by this, because nothing is buffered outside the channel.
+channel_capacity = 10000
+buffer_capacity = 100000
+# "block" applies real backpressure and never loses an event, which is what an
+# index wants. "drop_newest" and "drop_oldest" shed load instead.
+overflow_policy = "block"
+parse_batch_size = 100
+max_payload_size = 10485760
+
+[processor]
+worker_count = 4
+batch_size = 100
 batch_timeout_ms = 100
+parallel_handlers = true
+max_latency_ms = 5000
+# How many slots of chain history to keep for fork detection. This bounds both
+# memory and how deep a reorg can be resolved exactly; below the window a slot
+# is reported as ignored rather than guessed at.
+chain_tracker_max_slots = 10000
 
+[persister]
+# Larger batches write faster; smaller ones put data in front of readers sooner.
+batch_size = 500
+batch_timeout_ms = 100
+max_retries = 3
+retry_backoff_ms = 100
+batch_writes = true
 
 [backfill]
-# Solana RPC endpoint for historical data
-rpc_endpoint = "https://api.mainnet-beta.solana.com"
-
-# Slots per RPC request
+enabled = true
 batch_size = 100
-
-# Delay between batches (milliseconds)
+# Pause between batches, to stay inside an RPC provider's rate limits.
 batch_delay_ms = 100
-
-# Maximum concurrent RPC requests
 max_concurrent = 4
-
-# Retry count for failed requests
+rate_limit_rps = 10
 max_retries = 3
 
-# Rate limit (requests per second)
-rate_limit_rps = 100
-
+[rpc]
+# Solana JSON-RPC, used by backfill only.
+endpoint = "https://api.mainnet-beta.solana.com"
+timeout_secs = 30
+rate_limit_rps = 10
+max_retries = 3
 
 [dlq]
-# Maximum retry attempts before exhausted
 max_retries = 3
-
-# Automatically retry failed events
 auto_retry = false
-
-# Channel buffer size
-channel_size = 1000
-
-# Hours before unresolved items trigger alert
 alert_threshold_hours = 24
+purge_after_days = 30
 
-
-[metrics]
-# Enable Prometheus metrics
+[api]
 enabled = true
-
-# Metrics server port
+bind_address = "0.0.0.0"
 port = 8080
+max_page_size = 1000
+default_page_size = 100
 
-# Metrics path
-path = "/metrics"
-
-
-[logging]
-# Log level: trace, debug, info, warn, error
-level = "info"
-
-# Log format: json, pretty
-format = "json"
+[observability]
+metrics_enabled = true
+# Metrics are served on the API's port, alongside the read endpoints.
+metrics_port = 9090
+log_level = "info"
+# "json" or "pretty".
+log_format = "json"
+tracing_enabled = true

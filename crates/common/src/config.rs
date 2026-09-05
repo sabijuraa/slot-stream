@@ -575,6 +575,25 @@ mod tests {
     }
 
     #[test]
+    fn the_example_config_matches_this_schema() {
+        // The example file documents every setting. If a field is renamed and
+        // the file is not, the file quietly starts describing a config nobody
+        // can load, so it is parsed here rather than trusted.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.example.toml");
+        let text = std::fs::read_to_string(path).expect("config.example.toml");
+        let config: PipelineConfig = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("config.example.toml does not parse: {e}"));
+        config
+            .validate()
+            .expect("the documented example must be valid");
+
+        // Spot-check that it is the real file and not an empty one that would
+        // parse as all-defaults.
+        assert!(config.database.url.starts_with("postgres://"));
+        assert_eq!(config.ingester.overflow_policy, "block");
+    }
+
+    #[test]
     fn test_config_validation() {
         let mut config = PipelineConfig::default();
         config.ingester.buffer_capacity = 0;
