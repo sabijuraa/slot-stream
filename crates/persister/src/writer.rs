@@ -13,7 +13,12 @@ pub enum WriteResult {
     Updated,
 }
 
-/// Writes events to Postgres.
+/// Owns the event upsert.
+///
+/// The statement and the parameter binding live here and nowhere else. The batch
+/// commit in the crate root runs inside a transaction it also uses for slots and
+/// the cursor, so it calls [`EventWriter::write_in_tx`] rather than restating the
+/// query — two copies of a twelve-parameter bind is two things to keep in step.
 ///
 /// # Idempotency
 ///
@@ -30,15 +35,16 @@ pub struct EventWriter {
     pool: PgPool,
 }
 
-/// Shared with the batch commit path in the crate root.
-pub(crate) const UPSERT_SQL_PUB: &str = UPSERT_SQL;
-
 const UPSERT_SQL: &str = r#"
 INSERT INTO events (
     id, seq, source_seq, slot, parent_slot, kind,
     data, event_hash, received_at, indexed_at, is_valid, invalidated_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL)
+-- Note what is absent: seq is not updated. It is the order readers page
+-- through, so a redelivery must not move an existing row to a new position
+-- and slip past a reader's cursor. The row keeps the place it was first
+-- given; only its content and validity are refreshed.
 ON CONFLICT (slot, source_seq) DO UPDATE SET
     data           = EXCLUDED.data,
     parent_slot    = EXCLUDED.parent_slot,
@@ -82,47 +88,24 @@ impl EventWriter {
         })
     }
 
-    /// Write a batch of events in one transaction.
+    /// Write one event inside a caller's transaction.
     ///
-    /// All or nothing: a partial batch would leave the cursor ahead of the data.
-    pub async fn write_batch(&self, events: &[IndexedEvent]) -> Result<BatchOutcome> {
-        if events.is_empty() {
-            return Ok(BatchOutcome::default());
-        }
-
-        let mut tx: Transaction<'_, Postgres> = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| Error::DatabaseConnection(e.to_string()))?;
-
-        let mut outcome = BatchOutcome::default();
-
-        for event in events {
-            let row = Self::bind(sqlx::query(UPSERT_SQL), event)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| Error::DatabaseQuery(e.to_string()))?;
-
-            if row.get::<bool, _>("inserted") {
-                outcome.inserted += 1;
-            } else {
-                outcome.updated += 1;
-            }
-        }
-
-        tx.commit()
+    /// The batch commit path uses this: its transaction also carries the slot
+    /// rows and the cursor, so it cannot be handed one that commits itself.
+    pub async fn write_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        event: &IndexedEvent,
+    ) -> Result<WriteResult> {
+        let row = Self::bind(sqlx::query(UPSERT_SQL), event)
+            .fetch_one(&mut **tx)
             .await
             .map_err(|e| Error::DatabaseQuery(e.to_string()))?;
 
-        debug!(
-            batch_size = events.len(),
-            inserted = outcome.inserted,
-            updated = outcome.updated,
-            "batch written"
-        );
-
-        Ok(outcome)
+        Ok(if row.get::<bool, _>("inserted") {
+            WriteResult::Inserted
+        } else {
+            WriteResult::Updated
+        })
     }
 
     fn bind<'q>(
@@ -156,5 +139,13 @@ impl BatchOutcome {
     /// Total rows touched.
     pub fn total(&self) -> u64 {
         self.inserted + self.updated
+    }
+
+    /// Fold one write's result in.
+    pub fn record(&mut self, result: WriteResult) {
+        match result {
+            WriteResult::Inserted => self.inserted += 1,
+            WriteResult::Updated => self.updated += 1,
+        }
     }
 }

@@ -334,26 +334,7 @@ impl Persister {
 
         let mut outcome = BatchOutcome::default();
         for event in events {
-            let row = sqlx::query(writer::UPSERT_SQL_PUB)
-                .bind(event.id)
-                .bind(event.seq.0 as i64)
-                .bind(event.source_seq.0 as i64)
-                .bind(event.slot as i64)
-                .bind(event.parent_slot.map(|s| s as i64))
-                .bind(event.kind.as_str())
-                .bind(&event.data)
-                .bind(&event.event_hash)
-                .bind(event.received_at)
-                .bind(event.indexed_at)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| Error::DatabaseQuery(e.to_string()))?;
-
-            if row.get::<bool, _>("inserted") {
-                outcome.inserted += 1;
-            } else {
-                outcome.updated += 1;
-            }
+            outcome.record(EventWriter::write_in_tx(&mut tx, event).await?);
         }
 
         // The cursor rides the same transaction as the data it describes. If the
@@ -421,11 +402,7 @@ impl PendingBatch {
         let mark = (event.slot, event.seq, event.source_seq);
         self.watermark = Some(match self.watermark {
             None => mark,
-            Some((slot, seq, source)) => (
-                slot.max(mark.0),
-                seq.max(mark.1),
-                source.max(mark.2),
-            ),
+            Some((slot, seq, source)) => (slot.max(mark.0), seq.max(mark.1), source.max(mark.2)),
         });
         self.events.push(event);
     }
