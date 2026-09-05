@@ -69,7 +69,8 @@ impl Pipeline {
         // persister fills the persist channel, which stalls the processor, which
         // fills the raw channel, which stalls the ingester, which stops reading
         // the source. That chain is the backpressure design.
-        let (persist_tx, persist_rx) = mpsc::channel::<PersistCommand>(config.persister.batch_size * 4);
+        let (persist_tx, persist_rx) =
+            mpsc::channel::<PersistCommand>(config.persister.batch_size * 4);
         let (raw_tx, raw_rx) = mpsc::channel(config.ingester.channel_capacity);
 
         let mut processor = Processor::resuming(
@@ -153,17 +154,19 @@ impl Pipeline {
     ///
     /// The order is the pipeline order, and each step is what unblocks the next:
     ///
-    /// 1. Ask the ingester to stop, then drop it. Dropping it is the part that
-    ///    matters — it owns the only sender for the raw channel, and the
-    ///    processor's loop runs until that channel closes.
+    /// 1. Ask the ingester to stop. That releases the raw channel's only sender,
+    ///    and the processor's loop runs until that channel closes. It is an
+    ///    explicit release rather than a drop, so a caller still holding a handle
+    ///    to the ingester — a metrics sampler, the operator API — cannot wedge
+    ///    the shutdown.
     /// 2. Wait for the processor. When it returns, its task releases the last
     ///    reference to the `Processor`, which owns the only sender for the
     ///    persist channel.
     /// 3. Wait for the persister, which flushes its final batch and commits the
     ///    cursor before returning.
     ///
-    /// Skipping a drop here does not fail loudly; it hangs. So the drops are
-    /// explicit and named rather than left to a `..` pattern.
+    /// Step 2 still depends on a drop, so it is explicit and named rather than
+    /// left to a `..` pattern: skipping it does not fail loudly, it hangs.
     pub async fn shutdown(self) -> Result<()> {
         info!("shutting down pipeline");
 
@@ -177,6 +180,7 @@ impl Pipeline {
             persister_task,
         } = self;
 
+        // Closes the raw channel; see `Ingester::shutdown`.
         ingester.shutdown();
         drop(ingester);
 

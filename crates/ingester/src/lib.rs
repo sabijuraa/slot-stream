@@ -34,6 +34,7 @@ pub mod source;
 use slot_stream_common::{
     Error, RawEvent, Result, SequenceNumber, SequenceRange, SequenceResult, SequenceTracker,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -65,6 +66,7 @@ pub struct Ingester {
     sequence_tracker: Arc<parking_lot::Mutex<SequenceTracker>>,
     stats: Arc<parking_lot::Mutex<IngesterStats>>,
     shutdown: tokio::sync::broadcast::Sender<()>,
+    shutting_down: AtomicBool,
 }
 
 impl Ingester {
@@ -106,6 +108,7 @@ impl Ingester {
             sequence_tracker: Arc::new(parking_lot::Mutex::new(tracker)),
             stats: Arc::new(parking_lot::Mutex::new(IngesterStats::default())),
             shutdown,
+            shutting_down: AtomicBool::new(false),
             config,
         }
     }
@@ -134,6 +137,7 @@ impl Ingester {
                 ..Default::default()
             })),
             shutdown,
+            shutting_down: AtomicBool::new(false),
             config,
         };
 
@@ -147,6 +151,32 @@ impl Ingester {
         stats
     }
 
+    /// How full the ingestion buffer is, from 0.0 to 1.0.
+    ///
+    /// Exposed because "is backpressure engaging" is a question an operator asks
+    /// during an incident, and the answer is this number rather than a drop count
+    /// that stays at zero under the blocking policy.
+    pub fn buffer_utilization(&self) -> f64 {
+        self.buffer.utilization()
+    }
+
+    /// Events currently queued for the processor.
+    pub fn buffer_depth(&self) -> usize {
+        self.buffer
+            .capacity()
+            .saturating_sub(self.buffer.available())
+    }
+
+    /// Capacity of the ingestion buffer.
+    pub fn buffer_capacity(&self) -> usize {
+        self.buffer.capacity()
+    }
+
+    /// Times a push had to wait for room.
+    pub fn blocked_waits(&self) -> u64 {
+        self.buffer.blocked_waits()
+    }
+
     /// Pending sequence gaps that warrant a backfill.
     pub fn pending_gaps(&self) -> Vec<SequenceRange> {
         self.sequence_tracker.lock().pending_gaps().to_vec()
@@ -157,9 +187,21 @@ impl Ingester {
         self.sequence_tracker.lock().has_gaps()
     }
 
-    /// Ask the ingester to stop after the current event.
+    /// Ask the ingester to stop after the current event, and release the buffer.
+    ///
+    /// Closing the buffer here rather than in `Drop` is what lets a caller shut
+    /// the pipeline down while still holding a handle to the ingester — to read
+    /// its final statistics, say. The downstream stage sees the channel close
+    /// and finishes draining.
     pub fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         let _ = self.shutdown.send(());
+        self.buffer.close();
+    }
+
+    /// Whether shutdown has been requested.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 
     /// Read `source` until it is exhausted or shutdown is requested.
@@ -192,7 +234,17 @@ impl Ingester {
                 Some(Ok(event)) => {
                     backoff = self.config.initial_backoff;
                     attempts = 0;
-                    self.handle_event(event).await?;
+                    match self.handle_event(event).await {
+                        Ok(()) => {}
+                        // The buffer closing under us is the expected way a
+                        // shutdown reaches a blocked push. Anything else is a
+                        // genuine failure.
+                        Err(Error::ChannelClosed) if self.is_shutting_down() => {
+                            info!("buffer closed during shutdown");
+                            break;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 Some(Err(e)) => {
                     if !source.is_resumable() {
@@ -237,6 +289,22 @@ impl Ingester {
 
     /// Track and forward one event.
     async fn handle_event(&self, event: RawEvent) -> Result<()> {
+        // Backfilled and replayed events do not belong to the live sequence.
+        // Judging them against it would drop a replay as a rewind and report a
+        // backfill's stride-based number as a gap of millions.
+        if !event.origin.is_sequenced() {
+            {
+                let mut stats = self.stats.lock();
+                stats.events_received += 1;
+                stats.bytes_received += event.payload.len() as u64;
+            }
+            if self.buffer.push(event).await? {
+                self.stats.lock().events_emitted += 1;
+                metrics::counter!("ingester.events_emitted").increment(1);
+            }
+            return Ok(());
+        }
+
         let sequence_result = {
             let mut tracker = self.sequence_tracker.lock();
             match tracker.process(event.sequence) {
@@ -277,9 +345,13 @@ impl Ingester {
             SequenceResult::Processed => {}
         }
 
-        self.buffer.push(event).await?;
-        self.stats.lock().events_emitted += 1;
-        metrics::counter!("ingester.events_emitted").increment(1);
+        // Only what the buffer actually accepted counts as emitted. Under a
+        // shedding policy the difference is the drop count, and it has to
+        // reconcile with what lands in the database.
+        if self.buffer.push(event).await? {
+            self.stats.lock().events_emitted += 1;
+            metrics::counter!("ingester.events_emitted").increment(1);
+        }
         Ok(())
     }
 }
