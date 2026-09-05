@@ -13,7 +13,6 @@
 pub mod config;
 pub mod error;
 pub mod event;
-pub mod metrics;
 pub mod rollback;
 pub mod sequence;
 pub mod slot;
