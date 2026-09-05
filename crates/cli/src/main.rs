@@ -3,10 +3,10 @@
 //! Wires the pipeline, serves the read API, and shuts down cleanly.
 
 use anyhow::{Context, Result};
-use slot_stream_pipeline::{self as pipeline, Pipeline};
 use slot_stream_api::{ApiState, EventStore};
 use slot_stream_common::PipelineConfig;
 use slot_stream_ingester::{ChainScript, GrpcEventSource, ScriptedSource};
+use slot_stream_pipeline::{self as pipeline, Pipeline};
 use std::net::SocketAddr;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -124,22 +124,19 @@ fn source_mode() -> SourceMode {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4);
-            SourceMode::Scripted(Box::new(
-                ChainScript::new().extend_from(1, slots, events),
-            ))
+            SourceMode::Scripted(Box::new(ChainScript::new().extend_from(1, slots, events)))
         }
         _ => SourceMode::Grpc,
     }
 }
 
 fn load_config() -> Result<PipelineConfig> {
-    // A file if one is named, environment otherwise. Env always wins for the
-    // handful of settings a container image needs to override.
+    // A file if one is named, defaults otherwise, and in both cases the
+    // environment is layered on top: a container image overrides DATABASE_URL
+    // without having to rewrite the file it ships with.
     match std::env::var("CONFIG_FILE") {
         Ok(path) => {
-            let config = PipelineConfig::from_file(&path)
-                .with_context(|| format!("loading config from {path}"))?;
-            Ok(config)
+            PipelineConfig::from_file(&path).with_context(|| format!("loading config from {path}"))
         }
         Err(_) => PipelineConfig::from_env().context("loading config from the environment"),
     }
@@ -152,7 +149,9 @@ fn init_tracing(config: &PipelineConfig) {
     let registry = tracing_subscriber::registry().with(filter);
 
     if config.observability.log_format == "json" {
-        registry.with(tracing_subscriber::fmt::layer().json()).init();
+        registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
     } else {
         registry.with(tracing_subscriber::fmt::layer()).init();
     }

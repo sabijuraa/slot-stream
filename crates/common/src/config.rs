@@ -1,11 +1,16 @@
 //! Configuration types for the slot-stream pipeline.
 //!
 //! All configuration can be loaded from TOML files or environment variables.
+//!
+//! Every section carries `serde(default)`, so a config file names only what it
+//! overrides. A deployment that wants a different database URL should not have
+//! to restate the backoff schedule to get one.
 
 use serde::{Deserialize, Serialize};
 
 /// Root configuration for the entire pipeline.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PipelineConfig {
     /// Ingester configuration.
     pub ingester: IngesterSettings,
@@ -35,12 +40,12 @@ pub struct PipelineConfig {
     pub observability: ObservabilitySettings,
 
     /// Read API configuration.
-    #[serde(default)]
     pub api: ApiSettings,
 }
 
 /// Settings for the read API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ApiSettings {
     /// Whether to serve the read API.
     pub enabled: bool,
@@ -72,6 +77,7 @@ impl Default for ApiSettings {
 
 /// Ingester settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IngesterSettings {
     /// Buffer capacity for events.
     pub buffer_capacity: usize,
@@ -103,6 +109,7 @@ impl Default for IngesterSettings {
 
 /// Processor settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProcessorSettings {
     /// Number of worker tasks.
     pub worker_count: usize,
@@ -138,6 +145,7 @@ impl Default for ProcessorSettings {
 
 /// Persister settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersisterSettings {
     /// Batch size for writes.
     pub batch_size: usize,
@@ -169,6 +177,7 @@ impl Default for PersisterSettings {
 
 /// Backfill settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BackfillSettings {
     /// Enabled backfill on startup.
     pub enabled: bool,
@@ -204,6 +213,7 @@ impl Default for BackfillSettings {
 
 /// DLQ settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DlqSettings {
     /// Maximum retry attempts.
     pub max_retries: u32,
@@ -231,6 +241,7 @@ impl Default for DlqSettings {
 
 /// Database settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DatabaseSettings {
     /// Connection URL.
     pub url: String,
@@ -266,6 +277,7 @@ impl Default for DatabaseSettings {
 
 /// gRPC settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GrpcSettings {
     /// Geyser endpoint URL.
     pub endpoint: String,
@@ -309,6 +321,7 @@ impl Default for GrpcSettings {
 
 /// RPC settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RpcSettings {
     /// RPC endpoint URL.
     pub endpoint: String,
@@ -336,6 +349,7 @@ impl Default for RpcSettings {
 
 /// Observability settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ObservabilitySettings {
     /// Enable metrics.
     pub metrics_enabled: bool,
@@ -368,44 +382,69 @@ impl Default for ObservabilitySettings {
 impl PipelineConfig {
     /// Load configuration from a TOML file.
     pub fn from_file(path: &str) -> Result<Self, ConfigError> {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
-        let config: Self = toml::from_str(&contents)
-            .map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let mut config: Self =
+            toml::from_str(&contents).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        config.apply_env_overrides()?;
         config.validate()?;
         Ok(config)
     }
 
-    /// Load configuration from environment variables.
+    /// Load configuration from environment variables, over the defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut config = Self::default();
-
-        // Override with environment variables
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            config.database.url = url;
-        }
-        if let Ok(endpoint) = std::env::var("GRPC_ENDPOINT") {
-            config.grpc.endpoint = endpoint;
-        }
-        if let Ok(endpoint) = std::env::var("RPC_ENDPOINT") {
-            config.rpc.endpoint = endpoint;
-        }
-        if let Ok(level) = std::env::var("LOG_LEVEL") {
-            config.observability.log_level = level;
-        }
-        if let Ok(port) = std::env::var("METRICS_PORT") {
-            config.observability.metrics_port = port
-                .parse()
-                .map_err(|_| ConfigError::ValidationError(format!("METRICS_PORT: {port}")))?;
-        }
-        if let Ok(port) = std::env::var("API_PORT") {
-            config.api.port = port
-                .parse()
-                .map_err(|_| ConfigError::ValidationError(format!("API_PORT: {port}")))?;
-        }
-
+        config.apply_env_overrides()?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Apply environment overrides in place.
+    ///
+    /// Kept separate from [`Self::from_env`] so a config file can be layered
+    /// under the same overrides. A container image sets `DATABASE_URL` and
+    /// expects it to win regardless of what the baked-in file says; making that
+    /// depend on whether `CONFIG_FILE` happens to be set would be a trap.
+    pub fn apply_env_overrides(&mut self) -> Result<(), ConfigError> {
+        fn parse<T: std::str::FromStr>(key: &str) -> Result<Option<T>, ConfigError> {
+            match std::env::var(key) {
+                Ok(raw) => raw
+                    .parse()
+                    .map(Some)
+                    .map_err(|_| ConfigError::ValidationError(format!("{key}: {raw}"))),
+                Err(_) => Ok(None),
+            }
+        }
+
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            self.database.url = url;
+        }
+        if let Ok(endpoint) = std::env::var("GRPC_ENDPOINT") {
+            self.grpc.endpoint = endpoint;
+        }
+        if let Ok(endpoint) = std::env::var("RPC_ENDPOINT") {
+            self.rpc.endpoint = endpoint;
+        }
+        if let Ok(level) = std::env::var("LOG_LEVEL") {
+            self.observability.log_level = level;
+        }
+        if let Ok(format) = std::env::var("LOG_FORMAT") {
+            self.observability.log_format = format;
+        }
+        if let Some(port) = parse("METRICS_PORT")? {
+            self.observability.metrics_port = port;
+        }
+        if let Some(enabled) = parse::<bool>("METRICS_ENABLED")? {
+            self.observability.metrics_enabled = enabled;
+        }
+        if let Some(port) = parse("API_PORT")? {
+            self.api.port = port;
+        }
+        if let Some(enabled) = parse::<bool>("API_ENABLED")? {
+            self.api.enabled = enabled;
+        }
+
+        Ok(())
     }
 
     /// Validate the configuration.
@@ -463,6 +502,79 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_config_file_keeps_the_defaults_for_everything_else() {
+        // The point of serde(default) on every section: naming one setting must
+        // not require restating the rest of the file.
+        let config: PipelineConfig = toml::from_str(
+            r#"
+            [database]
+            url = "postgres://example/db"
+            max_connections = 3
+
+            [api]
+            enabled = false
+            "#,
+        )
+        .expect("a partial config must parse");
+
+        assert_eq!(config.database.url, "postgres://example/db");
+        assert_eq!(config.database.max_connections, 3);
+        assert!(!config.api.enabled);
+        assert_eq!(
+            config.ingester.channel_capacity,
+            IngesterSettings::default().channel_capacity,
+            "an unnamed section keeps its defaults"
+        );
+        assert_eq!(
+            config.grpc.max_reconnect_attempts,
+            GrpcSettings::default().max_reconnect_attempts
+        );
+        config.validate().expect("defaults must be valid");
+    }
+
+    #[test]
+    fn environment_overrides_apply_over_a_config_file() {
+        // The container case: a baked-in file, one setting supplied per
+        // deployment. Serialised because the environment is process-wide.
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut config: PipelineConfig = toml::from_str(
+            r#"
+            [database]
+            url = "postgres://from-file/db"
+
+            [grpc]
+            endpoint = "http://from-file:1234"
+            "#,
+        )
+        .unwrap();
+
+        std::env::set_var("DATABASE_URL", "postgres://from-env/db");
+        config.apply_env_overrides().unwrap();
+        std::env::remove_var("DATABASE_URL");
+
+        assert_eq!(config.database.url, "postgres://from-env/db");
+        assert_eq!(
+            config.grpc.endpoint, "http://from-file:1234",
+            "a setting the environment does not name keeps the file's value"
+        );
+    }
+
+    #[test]
+    fn a_malformed_override_is_an_error_not_a_silent_default() {
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut config = PipelineConfig::default();
+        std::env::set_var("API_PORT", "not-a-port");
+        let result = config.apply_env_overrides();
+        std::env::remove_var("API_PORT");
+
+        assert!(result.is_err(), "a bad port must surface, not be ignored");
+    }
+
+    #[test]
     fn test_config_validation() {
         let mut config = PipelineConfig::default();
         config.ingester.buffer_capacity = 0;
@@ -474,7 +586,13 @@ mod tests {
         let config = PipelineConfig::default();
         let text = toml::to_string(&config).expect("serialize");
         let parsed: PipelineConfig = toml::from_str(&text).expect("parse");
-        assert_eq!(parsed.database.max_connections, config.database.max_connections);
-        assert_eq!(parsed.ingester.buffer_capacity, config.ingester.buffer_capacity);
+        assert_eq!(
+            parsed.database.max_connections,
+            config.database.max_connections
+        );
+        assert_eq!(
+            parsed.ingester.buffer_capacity,
+            config.ingester.buffer_capacity
+        );
     }
 }
